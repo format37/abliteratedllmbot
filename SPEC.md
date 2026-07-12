@@ -135,7 +135,7 @@ class OllamaClient:
 
 **`chat_stream` behaviour**
 1. `model = model or cfg.model`. Look up capabilities (raise `ModelNotFoundError` if `/api/show` 404).
-2. `think = resolve_think(model)`. If `think_mode == "off"` or model lacks `"thinking"`, send **no** `think` param (or `think:false`) — never `think:true` to an incapable model **[V]**.
+2. `think = resolve_think(caps)`. **Only** `think_mode == "auto"` on a model whose caps include `"thinking"` sends `think:true`; `"inline"` (always parse tags per §2) and `"off"` send **no** `think` param — never `think:true` to an incapable model **[V]**.
 3. Build options from `cfg.options` + `stop = cfg.stop`. Attach `images` (base64) only on the vision path.
 4. Stream chunks. For each chunk:
    - **Structured path** (`chunk.message.thinking` present): emit `Delta("thinking", text=…)` / `Delta("content", text=…)`.
@@ -269,7 +269,7 @@ Default `finalize_mode: rich` is **safe everywhere**: with `rich_requires_base_u
 ## 11. Access control & commands
 
 - **`access_control(allowed_ids, cfg)`** decorator wraps every handler; unauthorized `effective_user.id` → `on_denied` policy: `reply_once` (default; a `bot_data` set suppresses repeats — resets on restart, acceptable for v1), `reply_always`, or `ignore`.
-- **Commands (v1):** `/start` (greeting + who‑am‑I), `/help`, `/reset` (clear history), `/stats` (last‑gen tokens/sec + durations from the `done` stats, in‑memory), `/think` (per‑chat toggle of `show_thinking`). `/model` is v1.1, gated by `commands.allow_model_switch` (default false).
+- **Commands (v1):** `/start` (greeting + who‑am‑I), `/help`, `/reset` (clear history), `/stats` (last‑gen tokens/sec + durations from the `done` stats, in‑memory), `/think` (per‑chat toggle of `show_thinking`). **Model‑admin commands** (gated by `commands.enable_model_admin`, default true): `/status` (which models Ollama holds in VRAM + auto‑unload time, via `/api/ps`), `/load` (warm the model — an empty `generate` with `keep_alive`), `/unload` (evict now, `keep_alive:0`). `/model` switching is v1.1, gated by `commands.allow_model_switch` (default false).
 
 ---
 
@@ -292,7 +292,7 @@ formatting: finalize_mode(plain|markdown_v2|rich), rich_requires_base_url, rich_
 sanitize:   strip_special_tokens, extra_tokens[]
 images:     mode(reject_note|caption_only|vision_fallback), note
 typing:     enabled, refresh_interval, stop_after_first_token
-commands:   allow_model_switch, enable_stats
+commands:   allow_model_switch, enable_stats, enable_model_admin
 logging:    level
 ```
 

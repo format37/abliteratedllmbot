@@ -29,4 +29,7 @@ include = ["abliteratedllmbot*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Offline by default: a bare `pytest` excludes the live-Ollama integration tests
+# (they cold-load a 35B model). Opt in with `pytest -m ollama` (the CLI -m overrides).
+addopts = "-m 'not ollama'"
 markers = ["ollama: integration tests that require a live Ollama server"]

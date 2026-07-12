@@ -116,6 +116,7 @@ class TypingConfig(BaseModel):
 class CommandsConfig(BaseModel):
     allow_model_switch: bool = False
     enable_stats: bool = True
+    enable_model_admin: bool = True          # /status /load /unload (Ollama load control)
 
 
 class LoggingConfig(BaseModel):

@@ -90,6 +90,7 @@ typing:
 commands:
   allow_model_switch: false    # gate /model (v1.1)
   enable_stats: true           # /stats
+  enable_model_admin: true     # /status /load /unload — inspect & control Ollama model load
 
 logging:
   level: INFO
