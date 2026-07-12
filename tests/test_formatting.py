@@ -114,18 +114,39 @@ async def test_finalize_no_reasoning_is_just_the_answer(make_bot, make_cfg):
     assert bot.calls_of("edit")[0]["text"] == "the answer"  # no blockquote
 
 
-async def test_finalize_reasoning_revert_drops_block_keeps_answer(make_bot, make_cfg):
+async def test_finalize_markdown_rejected_keeps_streamed_plain(make_bot, make_cfg):
     def on_edit(nth, kw):
         if kw.get("parse_mode") == "MarkdownV2":
             raise BadRequest("can't parse entities")
 
     bot = make_bot(on_edit=on_edit)
+    bot.messages[1000] = "the answer"  # the streamed plain answer already on screen
     cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
     await finalize(bot, cfg, 1, "the answer", [1000], reasoning="some reasoning")
     edits = bot.calls_of("edit")
-    # MarkdownV2 (with block) rejected -> plain revert shows the answer only
-    assert len(edits) == 2 and "parse_mode" not in edits[1]
-    assert edits[1]["text"] == "the answer" and "Reasoning" not in edits[1]["text"]
+    # only the failed MarkdownV2 attempt — no redundant plain re-edit (would be 'not modified')
+    assert len(edits) == 1 and edits[0]["parse_mode"] == "MarkdownV2"
+    assert bot.messages[1000] == "the answer"  # streamed plain preserved
+
+
+async def test_finalize_drops_reasoning_when_merged_overflows_4096(make_bot, make_cfg):
+    # merged (reasoning+answer) > 4096 but the answer alone fits -> answer-only markdown
+    bot = make_bot()
+    cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
+    answer = "a" * 3000
+    await finalize(bot, cfg, 1, answer, [1000], reasoning="r" * 2000)
+    edits = bot.calls_of("edit")
+    assert len(edits) == 1 and edits[0]["parse_mode"] == "MarkdownV2"
+    assert "Reasoning" not in edits[0]["text"] and edits[0]["text"] == answer  # reasoning dropped
+
+
+async def test_finalize_keeps_plain_when_answer_markdown_overflows_4096(make_bot, make_cfg):
+    # escaping doubles length: 3000 dots -> ~6000 md chars > 4096 -> no edit; plain stays
+    bot = make_bot()
+    bot.messages[1000] = "placeholder"
+    cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
+    await finalize(bot, cfg, 1, "." * 3000, [1000])
+    assert bot.calls_of("edit") == []  # no markdown attempt; streamed plain already correct
 
 
 # --- send_rich_message ------------------------------------------------------
@@ -213,17 +234,19 @@ async def test_finalize_markdown_v2_edits_single_message(make_bot, make_cfg):
     assert edits[0]["text"] == "hi *there*"
 
 
-async def test_finalize_markdown_v2_reverts_to_plain_on_badrequest(make_bot, make_cfg):
+async def test_finalize_markdown_v2_keeps_plain_on_badrequest(make_bot, make_cfg):
     def on_edit(nth, kw):
         if kw.get("parse_mode") == "MarkdownV2":
             raise BadRequest("can't parse entities")
 
     bot = make_bot(on_edit=on_edit)
+    bot.messages[1000] = "tricky *text"  # streamed plain answer already on screen
     cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
     await finalize(bot, cfg, 1, "tricky *text", [1000])
     edits = bot.calls_of("edit")
-    assert len(edits) == 2  # MarkdownV2 attempt, then plain revert
-    assert "parse_mode" not in edits[1] and edits[1]["text"] == "tricky *text"
+    # only the failed MarkdownV2 attempt; the streamed plain answer is left in place
+    assert len(edits) == 1 and edits[0]["parse_mode"] == "MarkdownV2"
+    assert bot.messages[1000] == "tricky *text"
 
 
 async def test_finalize_markdown_v2_multi_message_stays_plain(make_bot, make_cfg):

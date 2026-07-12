@@ -148,6 +148,12 @@ async def _send_txt(bot, chat_id: int, full_text: str) -> None:
 
 
 _REASONING_HEADER = "💭 Reasoning"
+_TG_TEXT_LIMIT = 4096  # a message's text is capped at 4096 UTF-16 code units
+
+
+def _tg_len(text: str) -> int:
+    """Length in UTF-16 code units — how Telegram counts toward the 4096 limit."""
+    return len(text.encode("utf-16-le")) // 2
 
 
 def _reasoning_block(reasoning: str) -> str:
@@ -163,26 +169,30 @@ async def _markdown_v2_in_place(
     scratch_message_ids: List[int],
     reasoning: str = "",
 ) -> None:
-    """Edit the streamed scratch message in place with MarkdownV2 — optionally with a
-    collapsed reasoning blockquote above the answer. On a parse error revert to plain
-    (answer only). Only the single-message case is re-rendered (the common one); a
-    rolled-over multi-message answer stays plain — markup can't be re-segmented safely."""
+    """Edit the streamed scratch message in place with MarkdownV2 — with the collapsed
+    reasoning blockquote above the answer when it fits. Escaping (and the reasoning
+    block) can push a near-rollover answer past 4096, so pick the richest candidate
+    that fits: merged -> answer-only markdown (drop reasoning) -> plain. Only the
+    single-message case is re-rendered; a rolled-over multi-message answer stays plain."""
     if len(scratch_message_ids) != 1:
         return  # multi-message rollover: leave the plain streamed text as-is
     mid = scratch_message_ids[0]
     try:
-        md = to_markdown_v2(full_text)  # inside try: a conversion slip also reverts to plain
+        answer_md = to_markdown_v2(full_text)  # inside try: a conversion slip keeps plain
+        candidates: List[str] = []
         if reasoning:
-            md = _reasoning_block(reasoning) + "\n\n" + md
+            candidates.append(_reasoning_block(reasoning) + "\n\n" + answer_md)  # merged (best)
+        candidates.append(answer_md)                                            # answer-only md
+        md = next((c for c in candidates if _tg_len(c) <= _TG_TEXT_LIMIT), None)
+        if md is None:
+            return  # even answer-only markdown overflows -> the plain answer is already shown
         await bot.edit_message_text(
             text=md, chat_id=chat_id, message_id=mid, parse_mode="MarkdownV2"
         )
     except BadRequest as exc:
-        logger.info("MarkdownV2 finalize rejected, reverting to plain: %s", exc)
-        try:  # plain revert: answer only — reasoning needs markup to collapse
-            await bot.edit_message_text(text=full_text, chat_id=chat_id, message_id=mid)
-        except BadRequest as exc2:
-            logger.debug("plain revert edit failed (likely 'not modified'): %s", exc2)
+        # The failed edit didn't change the message, so the already-streamed plain answer
+        # remains correct on screen — nothing to revert.
+        logger.info("MarkdownV2 finalize rejected, keeping the plain answer: %s", exc)
 
 
 async def finalize(
