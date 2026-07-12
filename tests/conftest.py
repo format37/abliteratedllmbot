@@ -10,6 +10,14 @@ import pytest
 from abliteratedllmbot.config import Settings
 
 
+def _reject_empty(text: str) -> None:
+    """Telegram rejects whitespace-only text with 400 'Text must be non-empty'."""
+    if not text or not text.strip():
+        from telegram.error import BadRequest
+
+        raise BadRequest("Text must be non-empty")
+
+
 class FakeMessage:
     def __init__(self, message_id: int) -> None:
         self.message_id = message_id
@@ -40,6 +48,7 @@ class FakeBot:
     async def send_message(self, chat_id: int, text: str, **kw):
         self._send_n += 1
         self.calls.append(("send", {"chat_id": chat_id, "text": text, **kw}))
+        _reject_empty(text)  # faithful to Telegram: whitespace-only -> 400
         if self._on_send is not None:
             self._on_send(self._send_n, {"chat_id": chat_id, "text": text, **kw})
         mid = self._next_id
@@ -52,6 +61,7 @@ class FakeBot:
         self.calls.append(
             ("edit", {"text": text, "chat_id": chat_id, "message_id": message_id, **kw})
         )
+        _reject_empty(text)
         if self._on_edit is not None:
             self._on_edit(self._edit_n, {"text": text, "message_id": message_id, **kw})
         self.messages[message_id] = text

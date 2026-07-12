@@ -114,6 +114,26 @@ async def test_rollover_reassembles_all_words(make_bot, make_cfg):
 
 # --- empty answer -----------------------------------------------------------
 
+async def test_leading_whitespace_content_never_sent_empty(make_bot, make_cfg):
+    # The verified abliterated shape: "\n\n" content before the real answer. Must not
+    # trip Telegram's non-empty rule, and the answer must start clean at the first char.
+    bot = make_bot()
+    await _run(
+        bot, make_cfg(),
+        Delta("content", text="\n\n"),      # pure whitespace first (post empty <think>)
+        Delta("content", text="Hi there!"),
+        Delta("done", done_reason="stop"),
+    )
+    assert list(bot.messages.values()) == ["Hi there!"]  # one clean, non-empty message
+
+
+async def test_all_whitespace_answer_falls_back_to_empty_note(make_bot, make_cfg):
+    bot = make_bot()
+    cfg = make_cfg()
+    await _run(bot, cfg, Delta("content", text="   \n\n  "), Delta("done", done_reason="stop"))
+    assert list(bot.messages.values()) == [cfg.streaming.empty_response_text]
+
+
 async def test_empty_answer_shows_note(make_bot, make_cfg):
     bot = make_bot()
     cfg = make_cfg()

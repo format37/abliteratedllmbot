@@ -133,8 +133,8 @@ class MessageEditor:
                 # Recompute each attempt: more text may have buffered during a
                 # RetryAfter sleep, and we always want to send the freshest text.
                 text = self._active_prefix() + self._cur_text
-                if not text or text == self._shown:
-                    return
+                if not text.strip() or text == self._shown:
+                    return  # never send whitespace-only (Telegram: 400 "Text must be non-empty")
                 try:
                     if self._cur_id is None:
                         msg = await self.bot.send_message(chat_id=self.chat_id, text=text)
@@ -269,6 +269,12 @@ class RenderDriver:
 
     async def _on_content(self, text: str) -> None:
         if not self._saw_content:
+            # Drop leading whitespace before the first real character — the abliterated
+            # model emits "\n\n" after the suppressed empty <think>. Opening the answer
+            # on whitespace would both look ugly and trip Telegram's non-empty rule.
+            text = text.lstrip()
+            if not text:
+                return  # still only whitespace — wait for the first real content
             self._saw_content = True
             if self.thinking_editor is not None:
                 await self.thinking_editor.finalize()  # seal the thinking bubble
