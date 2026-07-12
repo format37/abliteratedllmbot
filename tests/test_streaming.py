@@ -25,52 +25,65 @@ async def _run(bot, cfg, *deltas):
     return driver
 
 
-# --- ordering: thinking then answer -----------------------------------------
+# --- reasoning: streamed as ONE message, collapsed above the answer ---------
 
-async def test_thinking_then_answer_ordering(make_bot, make_cfg):
+async def test_reasoning_collapsed_above_answer_single_message(make_bot, make_cfg):
     bot = make_bot()
     driver = await _run(
-        bot, make_cfg(),
-        Delta("thinking", text="let me think"),
+        bot, make_cfg(formatting={"finalize_mode": "markdown_v2"}),
+        Delta("thinking", text="let me reason"),
         Delta("content", text="the answer"),
         Delta("done", done_reason="stop"),
     )
-    sends = bot.calls_of("send")
-    # first message is the thinking bubble (💭 prefix), then the answer message
-    assert sends[0]["text"].startswith("💭")
-    thinking_id = min(bot.messages) if bot.messages else None
-    # thinking message created before the answer message
-    assert any("💭" in t for t in bot.messages.values())
-    assert driver.answer_text == "the answer"
-    assert driver.answer_message_ids  # answer message tracked
-    # the thinking id precedes the answer id (creation order)
-    assert min(driver.answer_message_ids) > 1000
+    # exactly ONE message (no separate 💭 message); reasoning streamed nothing live
+    assert len(bot.messages) == 1
+    assert driver.reasoning_text == "let me reason"
+    final = bot.messages[max(bot.messages)]
+    # final render: expandable blockquote (💭 Reasoning + reasoning) above the answer
+    assert final.startswith(">💭 Reasoning")
+    assert ">let me reason" in final and final.rstrip().endswith("the answer")
+    assert "||" in final  # the expandability marker
+    # the finalize edit used MarkdownV2
+    assert any(kw.get("parse_mode") == "MarkdownV2" for _, kw in bot.calls)
 
 
-async def test_no_thinking_when_show_thinking_false(make_bot, make_cfg):
+async def test_no_reasoning_block_when_show_thinking_false(make_bot, make_cfg):
     bot = make_bot()
-    await _run(
-        bot, make_cfg(reasoning={"show_thinking": False}),
+    driver = await _run(
+        bot, make_cfg(reasoning={"show_thinking": False}, formatting={"finalize_mode": "markdown_v2"}),
         Delta("thinking", text="hidden"),
         Delta("content", text="visible"),
         Delta("done", done_reason="stop"),
     )
-    assert not any("💭" in kw.get("text", "") for _, kw in bot.calls)
-    assert not any("hidden" in kw.get("text", "") for _, kw in bot.calls)
+    assert driver.reasoning_text == ""  # reasoning not captured
+    final = bot.messages[max(bot.messages)]
+    assert "Reasoning" not in final and "hidden" not in final and final == "visible"
 
 
-async def test_thinking_cap_truncates(make_bot, make_cfg):
+async def test_reasoning_cap_truncates(make_bot, make_cfg):
     bot = make_bot()
-    await _run(
-        bot, make_cfg(reasoning={"max_thinking_chars": 10}),
+    driver = await _run(
+        bot, make_cfg(reasoning={"max_thinking_chars": 10}, formatting={"finalize_mode": "markdown_v2"}),
         Delta("thinking", text="x" * 50),
         Delta("content", text="a"),
         Delta("done", done_reason="stop"),
     )
-    think_msgs = [t for t in bot.messages.values() if "💭" in t]
-    assert think_msgs
-    # capped: prefix + <=10 x's + " …"
-    assert think_msgs[0].count("x") == 10 and "…" in think_msgs[0]
+    assert driver.reasoning_text.count("x") == 10 and driver.reasoning_text.endswith("…")
+    final = bot.messages[max(bot.messages)]
+    assert final.count("x") == 10 and "…" in final
+
+
+async def test_reasoning_streams_no_message_before_content(make_bot, make_cfg):
+    # While the model reasons (pre-content), NOTHING is sent — the typing indicator
+    # (M4) covers that gap; the reasoning shows collapsed only at finalize.
+    bot = make_bot()
+    await _run(
+        bot, make_cfg(formatting={"finalize_mode": "markdown_v2"}),
+        Delta("thinking", text="pondering deeply"),
+        Delta("done", done_reason="stop"),   # reasoning but no answer
+    )
+    # no answer content -> empty-response note (reasoning alone doesn't open a message)
+    assert list(bot.messages.values()) == [make_cfg().streaming.empty_response_text]
 
 
 # --- throttling -------------------------------------------------------------
@@ -278,7 +291,7 @@ async def test_heartbeat_flushes_during_stream_pause(make_bot, make_cfg):
 async def test_finalize_called_once_on_success(make_bot, make_cfg, monkeypatch):
     calls: list = []
 
-    async def spy(bot, cfg, chat_id, full_text, ids):
+    async def spy(bot, cfg, chat_id, full_text, ids, reasoning=""):
         calls.append((full_text, ids))
 
     monkeypatch.setattr(streaming.formatting, "finalize", spy)

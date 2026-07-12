@@ -8,7 +8,12 @@ import pytest
 from telegram.error import BadRequest
 
 import abliteratedllmbot.formatting as fmt
-from abliteratedllmbot.formatting import finalize, send_rich_message, to_markdown_v2
+from abliteratedllmbot.formatting import (
+    finalize,
+    send_rich_message,
+    to_expandable_blockquote,
+    to_markdown_v2,
+)
 
 
 # --- to_markdown_v2 ---------------------------------------------------------
@@ -67,6 +72,60 @@ def test_to_markdown_v2_nested_no_sentinel_leak(src):
 def test_to_markdown_v2_nested_preserves_inner_content():
     out = to_markdown_v2("**See [docs](http://x.com)**")
     assert "docs" in out and "http://x.com" in out and out == "*See [docs](http://x.com)*"
+
+
+# --- to_expandable_blockquote (collapsed reasoning) -------------------------
+
+def test_expandable_blockquote_quotes_lines_and_marks_expandable():
+    out = to_expandable_blockquote("line one\nline two")
+    assert out == ">line one\n>line two||"  # each line quoted, ends with ||
+
+
+def test_expandable_blockquote_escapes_special_chars():
+    out = to_expandable_blockquote("cost is 3.5 (a-b)")
+    # MarkdownV2 specials escaped inside the quote; still one expandable block
+    assert out == ">cost is 3\\.5 \\(a\\-b\\)||"
+    assert "\x00" not in out
+
+
+def test_expandable_blockquote_escapes_literal_pipe_and_gt():
+    # a literal > or | in reasoning must be escaped so it can't form markers
+    out = to_expandable_blockquote("a>b | c")
+    assert out.startswith(">a\\>b \\| c") and out.endswith("||")
+
+
+# --- finalize with collapsed reasoning --------------------------------------
+
+async def test_finalize_markdown_v2_prepends_collapsed_reasoning(make_bot, make_cfg):
+    bot = make_bot()
+    cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
+    await finalize(bot, cfg, 1, "the answer", [1000], reasoning="because reasons")
+    edits = bot.calls_of("edit")
+    assert len(edits) == 1 and edits[0]["parse_mode"] == "MarkdownV2"
+    text = edits[0]["text"]
+    assert text.startswith(">💭 Reasoning\n>because reasons||")
+    assert text.endswith("the answer")
+
+
+async def test_finalize_no_reasoning_is_just_the_answer(make_bot, make_cfg):
+    bot = make_bot()
+    cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
+    await finalize(bot, cfg, 1, "the answer", [1000], reasoning="")
+    assert bot.calls_of("edit")[0]["text"] == "the answer"  # no blockquote
+
+
+async def test_finalize_reasoning_revert_drops_block_keeps_answer(make_bot, make_cfg):
+    def on_edit(nth, kw):
+        if kw.get("parse_mode") == "MarkdownV2":
+            raise BadRequest("can't parse entities")
+
+    bot = make_bot(on_edit=on_edit)
+    cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
+    await finalize(bot, cfg, 1, "the answer", [1000], reasoning="some reasoning")
+    edits = bot.calls_of("edit")
+    # MarkdownV2 (with block) rejected -> plain revert shows the answer only
+    assert len(edits) == 2 and "parse_mode" not in edits[1]
+    assert edits[1]["text"] == "the answer" and "Reasoning" not in edits[1]["text"]
 
 
 # --- send_rich_message ------------------------------------------------------

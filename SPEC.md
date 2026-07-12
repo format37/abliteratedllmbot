@@ -17,7 +17,7 @@ A Telegram bot that fronts a **local, uncensored (abliterated) LLM served by Oll
 | 5 | Streaming | **Edit one message live**, throttled; roll over near the 4096 limit |
 | 6 | Memory | **Multi‑turn per chat**; `/reset` clears; configurable cap; oldest‑turn trimming |
 | 7 | Images | Default **reject‑with‑note** (default model is text‑only); optional vision‑model fallback |
-| 8 | Reasoning | **Show thinking separately**; capability‑gated; suppressed when empty |
+| 8 | Reasoning | **Show thinking in a collapsed (tap‑to‑expand) block above the answer**; capability‑gated; suppressed when empty |
 | 9 | Typing | `typing` chat action during the cold‑load / pre‑first‑token gap |
 | 10 | Formatting | pantherabot **rich** path: `sendRichMessage` → `.txt` → MarkdownV2 → plain |
 
@@ -198,15 +198,15 @@ Honors **edit‑one‑message‑live + thinking‑separate + rollover + throttle
 
 ### States
 ```
-IDLE ──first thinking delta──► THINKING ──first content delta──► ANSWER ──done──► DONE
-  └────────────────────first content delta───────────────────────►┘
-                                                (skip THINKING if no reasoning)
-error at any point ──► finalize partial + append error note
+IDLE ──thinking deltas (accumulate)──► THINKING ──first content──► ANSWER ──done──► DONE
+  └───────────────────────first content delta──────────────────────────►┘
+      (reasoning is collapsed above the answer at finalize, not shown live)
+error at any point ──► finalize partial + append error note (plain, no reasoning)
 ```
 
 ### Objects
 - **`MessageEditor`** — owns exactly one Telegram message; `feed(text)` appends to a buffer; flushes an `edit_message_text` when **`chars_since_edit ≥ batch_size`** *or* **`now-last_edit ≥ min_edit_interval`**; on a trailing timeout does a final flush; **rolls over** to a new message when the buffer would pass `rollover_chars` (3900), splitting on the last newline/space. Keeps `effective_interval` as a **local** (never mutates shared `Settings`) and multiplies it on `RetryAfter`.
-- **`RenderDriver`** — consumes `AsyncIterator[Delta]`, owns a thinking `MessageEditor` (lazily created on the first `thinking` delta, prefixed 💭) and an answer `MessageEditor`. On the first `content` delta it **finalizes** the thinking editor and opens the answer editor. On `done`/`error` it finalizes and hands the full answer text to `formatting.finalize()`.
+- **`RenderDriver`** — consumes `AsyncIterator[Delta]`. Reasoning (`thinking` deltas) is **accumulated** (capped at `max_thinking_chars`, gated by `show_thinking`), not streamed live — the typing indicator covers the reasoning gap. The first `content` delta opens the answer `MessageEditor` (leading whitespace stripped). On `done` it hands the answer **and** the accumulated reasoning to `formatting.finalize()`, which renders the reasoning as a **collapsed, tap‑to‑expand MarkdownV2 blockquote** (`expandable_blockquote`, verified on the official API) directly above the answer in the same message. On `error` the partial answer + note stays plain (no reasoning block).
 
 ### Flush mechanism
 A single `asyncio.Queue` fed by the delta consumer; the editor loop does `asyncio.wait_for(queue.get(), timeout=max_interval_seconds)` to get **trailing‑edge** flushes for free (D3 model), with `batch_size`/`min_edit_interval` as the leading‑edge knobs.

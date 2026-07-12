@@ -21,8 +21,6 @@ from .errors import Delta
 
 logger = logging.getLogger(__name__)
 
-_THINK_PREFIX = "💭 "
-
 
 class BotLike(Protocol):
     """The subset of telegram.Bot the renderer uses (so a FakeBot can stand in)."""
@@ -189,12 +187,11 @@ class RenderDriver:
         self.cfg = cfg
         self.answer_text = ""
         self.answer_message_ids: List[int] = []
-        self.thinking_editor: Optional[MessageEditor] = None
+        self.reasoning_text = ""     # accumulated <think> reasoning, collapsed at finalize
         self.answer_editor: Optional[MessageEditor] = None
         self.done_reason: Optional[str] = None
         self.stats: dict = {}
-        self._thinking_total = 0
-        self._thinking_capped = False
+        self._reasoning_capped = False
         self._saw_content = False
         self._heartbeat_task: Optional[asyncio.Task] = None
         # Optional hook fired once when the first real answer token lands (typing-stop).
@@ -229,7 +226,7 @@ class RenderDriver:
             self._stop_heartbeat()
 
     def _active_editor(self) -> Optional[MessageEditor]:
-        return self.answer_editor or self.thinking_editor
+        return self.answer_editor
 
     def _stop_heartbeat(self) -> None:
         if self._heartbeat_task is not None and not self._heartbeat_task.done():
@@ -252,20 +249,19 @@ class RenderDriver:
     # -- delta handlers ------------------------------------------------------
 
     async def _on_thinking(self, text: str) -> None:
-        if not self.cfg.reasoning.show_thinking or self._thinking_capped or not text:
+        # Accumulate reasoning (not streamed live); rendered as a collapsed,
+        # tap-to-expand blockquote above the answer at finalize. (SPEC §8)
+        if not self.cfg.reasoning.show_thinking or self._reasoning_capped or not text:
             return
-        if self.thinking_editor is None:
-            self.thinking_editor = MessageEditor(self.bot, self.chat_id, self.cfg, _THINK_PREFIX)
         cap = self.cfg.reasoning.max_thinking_chars
-        remaining = cap - self._thinking_total
+        remaining = cap - len(self.reasoning_text)
         if remaining <= 0:
+            self._reasoning_capped = True
             return
-        chunk = text[:remaining]
-        self._thinking_total += len(chunk)
-        await self.thinking_editor.feed(chunk)
-        if self._thinking_total >= cap:
-            self._thinking_capped = True
-            await self.thinking_editor.feed(" …")
+        self.reasoning_text += text[:remaining]
+        if len(self.reasoning_text) >= cap:
+            self._reasoning_capped = True
+            self.reasoning_text += " …"
 
     async def _on_content(self, text: str) -> None:
         if not self._saw_content:
@@ -276,8 +272,6 @@ class RenderDriver:
             if not text:
                 return  # still only whitespace — wait for the first real content
             self._saw_content = True
-            if self.thinking_editor is not None:
-                await self.thinking_editor.finalize()  # seal the thinking bubble
             self.answer_editor = MessageEditor(self.bot, self.chat_id, self.cfg)
             await self._fire_first_content()
         self.answer_text += text
@@ -298,9 +292,6 @@ class RenderDriver:
     # -- terminal ------------------------------------------------------------
 
     async def _finish(self, error: Optional[str]) -> None:
-        if self.thinking_editor is not None:
-            await self.thinking_editor.finalize()
-
         if error is not None:
             note = self.cfg.streaming.error_note.format(error=error)
             if self.answer_editor is None:
@@ -311,7 +302,7 @@ class RenderDriver:
                 await self.answer_editor.feed("\n\n" + note)
             await self.answer_editor.finalize()
             self.answer_message_ids = self.answer_editor.message_ids
-            return  # partial answer + note stays plain — no rich finalize
+            return  # partial answer + note stays plain — no rich finalize / reasoning
 
         if self.answer_editor is None:
             # completed with zero content -> empty-response note (plain, no finalize)
@@ -323,9 +314,11 @@ class RenderDriver:
 
         await self.answer_editor.finalize()
         self.answer_message_ids = self.answer_editor.message_ids
-        # Exactly ONE finalize pass on the whole answer (SPEC §10).
+        # Exactly ONE finalize pass: renders the answer with the reasoning collapsed
+        # above it (SPEC §8, §10).
         await formatting.finalize(
-            self.bot, self.cfg, self.chat_id, self.answer_text, self.answer_message_ids
+            self.bot, self.cfg, self.chat_id, self.answer_text, self.answer_message_ids,
+            reasoning=self.reasoning_text,
         )
 
     async def _on_cancel(self) -> None:
@@ -339,7 +332,5 @@ class RenderDriver:
                     await asyncio.shield(self.answer_editor.feed("\n\n" + note))
                 await asyncio.shield(self.answer_editor.finalize())
                 self.answer_message_ids = self.answer_editor.message_ids
-            elif self.thinking_editor is not None:
-                await asyncio.shield(self.thinking_editor.finalize())
         except Exception as exc:  # cleanup is best-effort
             logger.debug("supersede cleanup failed: %s", exc)

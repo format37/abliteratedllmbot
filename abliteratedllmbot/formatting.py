@@ -97,6 +97,15 @@ def to_markdown_v2(text: str) -> str:
     return text
 
 
+def to_expandable_blockquote(text: str) -> str:
+    """Render text as a Telegram MarkdownV2 EXPANDABLE (collapsed-by-default) blockquote:
+    every line prefixed with ``>``, the whole block ended with ``||``. Verified accepted
+    by the official Bot API (entity type ``expandable_blockquote``)."""
+    escaped = escape_markdown(text, version=2)  # escapes all specials, incl. literal > and |
+    lines = escaped.split("\n")
+    return "\n".join(">" + ln for ln in lines) + "||"
+
+
 async def send_rich_message(
     cfg: Settings, chat_id: int, markdown_text: str, reply_to: Optional[int] = None
 ) -> bool:
@@ -138,24 +147,39 @@ async def _send_txt(bot, chat_id: int, full_text: str) -> None:
     await bot.send_document(chat_id=chat_id, document=buffer, filename="response.txt")
 
 
+_REASONING_HEADER = "💭 Reasoning"
+
+
+def _reasoning_block(reasoning: str) -> str:
+    """A collapsed (expandable) MarkdownV2 blockquote carrying the reasoning."""
+    return to_expandable_blockquote(f"{_REASONING_HEADER}\n{reasoning}")
+
+
 async def _markdown_v2_in_place(
-    bot, cfg: Settings, chat_id: int, full_text: str, scratch_message_ids: List[int]
+    bot,
+    cfg: Settings,
+    chat_id: int,
+    full_text: str,
+    scratch_message_ids: List[int],
+    reasoning: str = "",
 ) -> None:
-    """Edit the streamed scratch message(s) in place with MarkdownV2; on a parse
-    error revert that message to plain. Only the single-message case is re-rendered
-    (the common one); a rolled-over multi-message answer stays plain — markup can't
-    be re-segmented safely across message boundaries and plain is always valid."""
+    """Edit the streamed scratch message in place with MarkdownV2 — optionally with a
+    collapsed reasoning blockquote above the answer. On a parse error revert to plain
+    (answer only). Only the single-message case is re-rendered (the common one); a
+    rolled-over multi-message answer stays plain — markup can't be re-segmented safely."""
     if len(scratch_message_ids) != 1:
         return  # multi-message rollover: leave the plain streamed text as-is
     mid = scratch_message_ids[0]
     try:
         md = to_markdown_v2(full_text)  # inside try: a conversion slip also reverts to plain
+        if reasoning:
+            md = _reasoning_block(reasoning) + "\n\n" + md
         await bot.edit_message_text(
             text=md, chat_id=chat_id, message_id=mid, parse_mode="MarkdownV2"
         )
     except BadRequest as exc:
         logger.info("MarkdownV2 finalize rejected, reverting to plain: %s", exc)
-        try:
+        try:  # plain revert: answer only — reasoning needs markup to collapse
             await bot.edit_message_text(text=full_text, chat_id=chat_id, message_id=mid)
         except BadRequest as exc2:
             logger.debug("plain revert edit failed (likely 'not modified'): %s", exc2)
@@ -167,27 +191,35 @@ async def finalize(
     chat_id: int,
     full_text: str,
     scratch_message_ids: List[int],
+    reasoning: str = "",
 ) -> None:
-    """Apply cfg.formatting.finalize_mode to the completed answer. (SPEC §10)
+    """Apply cfg.formatting.finalize_mode to the completed answer, optionally with the
+    model's reasoning as a collapsed (tap-to-expand) block above it. (SPEC §8, §10)
 
     'rich' only attempts sendRichMessage when telegram.base_url is set (unless
     rich_requires_base_url is False); on success it deletes the scratch messages
     so the answer re-appears richly formatted; otherwise it degrades gracefully
-    (>txt_fallback_over -> .txt document, else markdown_v2 in place)."""
+    (>txt_fallback_over -> .txt document, else markdown_v2 in place). Reasoning
+    collapse needs markup, so 'plain' and the .txt fallback show the answer only."""
     fmt = cfg.formatting
     mode = fmt.finalize_mode
+    reasoning = (reasoning or "").strip()
 
     if mode == "plain" or not scratch_message_ids:
         return  # leave the plain streamed text as-is
 
     if mode == "markdown_v2":
-        await _markdown_v2_in_place(bot, cfg, chat_id, full_text, scratch_message_ids)
+        await _markdown_v2_in_place(bot, cfg, chat_id, full_text, scratch_message_ids, reasoning)
         return
 
     # mode == "rich"
     may_rich = bool(cfg.telegram.base_url) or not fmt.rich_requires_base_url
     if may_rich and len(full_text) <= fmt.rich_max_chars:
-        if await send_rich_message(cfg, chat_id, full_text):
+        rich_md = full_text
+        if reasoning:  # rich messages take standard Markdown; a '>' blockquote for reasoning
+            quoted = "\n".join("> " + ln for ln in f"{_REASONING_HEADER}\n{reasoning}".split("\n"))
+            rich_md = quoted + "\n\n" + full_text
+        if await send_rich_message(cfg, chat_id, rich_md):
             for mid in scratch_message_ids:
                 await _safe_delete(bot, chat_id, mid)
             return
@@ -199,4 +231,4 @@ async def finalize(
             await _safe_delete(bot, chat_id, mid)
         return
 
-    await _markdown_v2_in_place(bot, cfg, chat_id, full_text, scratch_message_ids)
+    await _markdown_v2_in_place(bot, cfg, chat_id, full_text, scratch_message_ids, reasoning)
