@@ -161,6 +161,27 @@ def _reasoning_block(reasoning: str) -> str:
     return to_expandable_blockquote(f"{_REASONING_HEADER}\n{reasoning}")
 
 
+def _fit_reasoning_block(reasoning: str, budget: int) -> Optional[str]:
+    """The collapsed reasoning block, trimmed so it fits ``budget`` UTF-16 units.
+
+    Returns the full block when it already fits; otherwise binary-searches the
+    largest reasoning prefix whose block (with a trailing ``…`` truncation marker)
+    stays within budget. Returns ``None`` when even a minimal block overflows —
+    i.e. the answer alone already consumes almost the whole message."""
+    block = _reasoning_block(reasoning)
+    if _tg_len(block) <= budget:
+        return block
+    lo, hi, best = 0, len(reasoning), None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = _reasoning_block(reasoning[:mid].rstrip() + " …")
+        if _tg_len(candidate) <= budget:
+            best, lo = candidate, mid + 1  # fits: try to keep more
+        else:
+            hi = mid - 1
+    return best
+
+
 async def _markdown_v2_in_place(
     bot,
     cfg: Settings,
@@ -170,22 +191,32 @@ async def _markdown_v2_in_place(
     reasoning: str = "",
 ) -> None:
     """Edit the streamed scratch message in place with MarkdownV2 — with the collapsed
-    reasoning blockquote above the answer when it fits. Escaping (and the reasoning
-    block) can push a near-rollover answer past 4096, so pick the richest candidate
-    that fits: merged -> answer-only markdown (drop reasoning) -> plain. Only the
-    single-message case is re-rendered; a rolled-over multi-message answer stays plain."""
+    reasoning blockquote above the answer. Escaping (and the reasoning block) can push a
+    near-rollover answer past 4096, so render the richest thing that fits: reasoning is
+    TRIMMED (not dropped) to whatever budget the answer leaves, keeping the tap-to-expand
+    block alive for the long-reasoning case it exists for. If even answer-only markdown
+    overflows, the already-streamed plain answer is left as-is. Only the single-message
+    case is re-rendered; a rolled-over multi-message answer stays plain."""
     if len(scratch_message_ids) != 1:
         return  # multi-message rollover: leave the plain streamed text as-is
     mid = scratch_message_ids[0]
     try:
         answer_md = to_markdown_v2(full_text)  # inside try: a conversion slip keeps plain
-        candidates: List[str] = []
+        answer_units = _tg_len(answer_md)
+        if answer_units > _TG_TEXT_LIMIT:
+            logger.info(
+                "MarkdownV2 finalize: answer alone is %d > %d units; keeping the plain answer",
+                answer_units, _TG_TEXT_LIMIT,
+            )
+            return  # even the bare answer overflows -> the plain answer is already shown
+        md = answer_md
         if reasoning:
-            candidates.append(_reasoning_block(reasoning) + "\n\n" + answer_md)  # merged (best)
-        candidates.append(answer_md)                                            # answer-only md
-        md = next((c for c in candidates if _tg_len(c) <= _TG_TEXT_LIMIT), None)
-        if md is None:
-            return  # even answer-only markdown overflows -> the plain answer is already shown
+            budget = _TG_TEXT_LIMIT - answer_units - 2  # 2 units for the "\n\n" separator
+            block = _fit_reasoning_block(reasoning, budget)
+            if block is not None:
+                md = block + "\n\n" + answer_md  # reasoning trimmed to fit above the answer
+            else:
+                logger.info("MarkdownV2 finalize: no room for reasoning; answer-only markdown")
         await bot.edit_message_text(
             text=md, chat_id=chat_id, message_id=mid, parse_mode="MarkdownV2"
         )

@@ -129,15 +129,31 @@ async def test_finalize_markdown_rejected_keeps_streamed_plain(make_bot, make_cf
     assert bot.messages[1000] == "the answer"  # streamed plain preserved
 
 
-async def test_finalize_drops_reasoning_when_merged_overflows_4096(make_bot, make_cfg):
-    # merged (reasoning+answer) > 4096 but the answer alone fits -> answer-only markdown
+async def test_finalize_trims_reasoning_to_fit_when_merged_overflows_4096(make_bot, make_cfg):
+    # merged (full reasoning+answer) > 4096 -> reasoning is TRIMMED to fit, not dropped,
+    # and the whole message still fits under the 4096 cap.
     bot = make_bot()
     cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
     answer = "a" * 3000
     await finalize(bot, cfg, 1, answer, [1000], reasoning="r" * 2000)
     edits = bot.calls_of("edit")
     assert len(edits) == 1 and edits[0]["parse_mode"] == "MarkdownV2"
-    assert "Reasoning" not in edits[0]["text"] and edits[0]["text"] == answer  # reasoning dropped
+    text = edits[0]["text"]
+    assert text.startswith(">💭 Reasoning")            # collapsed reasoning survives
+    assert text.rstrip().endswith(answer)               # full answer preserved below it
+    assert "…" in text and "r" in text                  # trimmed with an ellipsis marker
+    assert fmt._tg_len(text) <= fmt._TG_TEXT_LIMIT       # and the whole thing fits
+
+
+async def test_finalize_reasoning_dropped_only_when_answer_nearly_fills_message(make_bot, make_cfg):
+    # answer alone fits but leaves no room for even a minimal reasoning block -> answer-only md
+    bot = make_bot()
+    cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
+    answer = "a" * 4090  # answer_md ~4090 units; < 4096 but no budget left for reasoning
+    await finalize(bot, cfg, 1, answer, [1000], reasoning="r" * 2000)
+    edits = bot.calls_of("edit")
+    assert len(edits) == 1 and edits[0]["parse_mode"] == "MarkdownV2"
+    assert "Reasoning" not in edits[0]["text"] and edits[0]["text"] == answer
 
 
 async def test_finalize_keeps_plain_when_answer_markdown_overflows_4096(make_bot, make_cfg):
