@@ -22,7 +22,9 @@ ollama:
   host: http://localhost:11434
   model: qwen3.6-abliterated:35b-a3b
   vision_model: qwen3-vl:30b-a3b-instruct-q8_0   # used only if images.mode = vision_fallback
-  keep_alive: 30m              # hold the model warm (cold load ~156s for the 35B MoE)
+  keep_alive: 30m              # hold the model warm (cold load ~156s for the 35B MoE).
+                               # Use a negative duration (e.g. "-1m") to pin it in VRAM
+                               # forever and manage it by hand with /load and /unload.
   connect_timeout: 10          # seconds
   request_timeout: 600         # seconds; MUST exceed cold-load + generation
   options:
