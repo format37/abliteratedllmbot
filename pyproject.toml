@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abliteratedllmbot"
+version = "0.1.0"
+description = "Telegram bot fronting a local abliterated LLM via Ollama"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "python-telegram-bot==22.8",
+    "ollama==0.5.1",
+    "pydantic==2.12.5",
+    "pydantic-settings==2.13.1",
+    "PyYAML==6.0.1",
+    "httpx==0.28.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+abliteratedllmbot = "abliteratedllmbot.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["abliteratedllmbot*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["ollama: integration tests that require a live Ollama server"]

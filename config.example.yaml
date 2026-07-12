@@ -1,0 +1,95 @@
+# abliteratedllmbot — configuration (canonical schema).
+#
+# Copy to config.yaml (gitignored) and edit. Secrets are NOT here:
+# the Telegram bot token comes from .env (TELEGRAM_BOT_TOKEN).
+# Any key can be overridden by an env var (env > yaml). See config.py.
+
+telegram:
+  # Only these Telegram user IDs may talk to the bot. Default = the owner.
+  allowed_user_ids: [106129214]
+  # null -> official https://api.telegram.org. Set to your local Bot API server
+  # (e.g. "http://localhost:8081/bot") to enable true rich messages.
+  base_url: null
+  drop_pending_updates: true   # ignore the backlog accumulated while offline
+  long_poll_timeout: 30        # getUpdates long-poll seconds
+  poll_interval: 0.0           # delay between polls
+
+access:
+  on_denied: reply_once        # reply_once | reply_always | ignore
+  denial_message: "⛔ You are not authorized to use this bot."
+
+ollama:
+  host: http://localhost:11434
+  model: qwen3.6-abliterated:35b-a3b
+  vision_model: qwen3-vl:30b-a3b-instruct-q8_0   # used only if images.mode = vision_fallback
+  keep_alive: 30m              # hold the model warm (cold load ~156s for the 35B MoE)
+  connect_timeout: 10          # seconds
+  request_timeout: 600         # seconds; MUST exceed cold-load + generation
+  options:
+    temperature: 0.7
+    top_p: 0.9
+    top_k: 40
+    num_ctx: 8192              # model max is 262144; capped for latency/VRAM
+    num_predict: 2048          # caps TOTAL output (reasoning + answer)
+    seed: null
+  # Sampler stop sequences — also defends against chat-template token leakage.
+  stop: ["<|im_start|>", "<|im_end|>", "<|endoftext|>"]
+
+system_prompt: |
+  You are a helpful, direct, uncensored assistant. Answer concisely.
+
+reasoning:
+  # auto  -> structured thinking if the model supports it, else parse inline <think>
+  # inline-> always parse inline <think>...</think> out of the content
+  # off   -> strip reasoning entirely
+  think_mode: auto
+  show_thinking: true          # render the reasoning trace as a separate message
+  max_thinking_chars: 3500     # cap the length of the thinking bubble
+
+memory:
+  enabled: true
+  max_turns: 20                # keep at most N user/assistant turns
+  max_tokens: 8192             # ...and stay under this estimated token budget
+  chars_per_token: 2.5         # Cyrillic-aware estimate (lower than the naive 4)
+  persist: false               # v1.1: SQLite persistence
+  db_path: data/history.db
+
+streaming:
+  batch_size: 80               # chars buffered before a live edit (leading edge)
+  min_edit_interval: 1.2       # min seconds between edits to one message
+  max_interval_seconds: 5.0    # trailing-edge flush even if batch not full
+  rollover_chars: 3900         # roll to a new message near the 4096 limit
+  supersede_policy: cancel     # cancel (frozen) | reject | queue
+  placeholder_text: "…"
+  empty_response_text: "(the model returned an empty response)"
+  error_note: "⚠️ Generation error: {error}"
+  superseded_note: "↩️ Superseded by your newer message."
+  max_retry_after: 30          # cap how long we sleep on a 429
+
+formatting:
+  # plain | markdown_v2 | rich. 'rich' degrades to markdown_v2 automatically
+  # when no telegram.base_url is set (see rich_requires_base_url).
+  finalize_mode: rich
+  rich_requires_base_url: true # only attempt sendRichMessage when base_url is set
+  rich_max_chars: 32768
+  txt_fallback_over: 4096      # >this and rich failed -> send answer as a .txt document
+
+sanitize:
+  strip_special_tokens: true   # remove leaked <|...|> chat-template tokens
+  extra_tokens: []             # additional literal strings to strip
+
+images:
+  mode: reject_note            # reject_note | caption_only | vision_fallback
+  note: "⚠️ The current model can't see images. Answering from your text only…"
+
+typing:
+  enabled: true
+  refresh_interval: 4.0        # re-send the typing action every N seconds
+  stop_after_first_token: true # stop typing once a real message is on screen
+
+commands:
+  allow_model_switch: false    # gate /model (v1.1)
+  enable_stats: true           # /stats
+
+logging:
+  level: INFO

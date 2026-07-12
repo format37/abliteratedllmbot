@@ -1,0 +1,20 @@
+# systemd unit for a bare-metal deploy. Install:
+#   sudo cp deploy/abliteratedllmbot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now abliteratedllmbot
+# Edit User/WorkingDirectory/ExecStart paths to match your host.
+[Unit]
+Description=abliteratedllmbot (Telegram <-> local Ollama)
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alex
+WorkingDirectory=/home/alex/projects/abliteratedllmbot
+ExecStart=/home/alex/projects/abliteratedllmbot/.venv/bin/python -m abliteratedllmbot /home/alex/projects/abliteratedllmbot/config.yaml
+Restart=on-failure
+RestartSec=5
+# Token comes from .env in WorkingDirectory (read by pydantic-settings).
+
+[Install]
+WantedBy=multi-user.target

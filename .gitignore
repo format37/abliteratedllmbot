@@ -1,0 +1,25 @@
+# Secrets & local config — NEVER commit these (public repo).
+.env
+config.yaml
+
+# Local data / model state
+data/
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    container_name: abliteratedllmbot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+    # Reach the host's Ollama from inside the container. Set ollama.host in
+    # config.yaml to http://host.docker.internal:11434 to use this mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Alternative to extra_hosts: use the host network and localhost:11434.
+    # network_mode: host

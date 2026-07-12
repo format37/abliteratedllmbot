@@ -1,0 +1,7 @@
+# Runtime deps (versions verified present on the dev host, 2026-07-12).
+python-telegram-bot==22.8
+ollama==0.5.1
+pydantic==2.12.5
+pydantic-settings==2.13.1
+PyYAML==6.0.1
+httpx==0.28.1
