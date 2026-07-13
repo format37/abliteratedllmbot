@@ -14,6 +14,10 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./data:/app/data
     environment:
+      # Container clocks are UTC unless told otherwise, so /status would print an
+      # unload time in the wrong zone. Set TZ in .env (e.g. TZ=Asia/Tbilisi) — see
+      # `timedatectl show -p Timezone` for your host's.
+      TZ: ${TZ:-Etc/UTC}
       # config.yaml says localhost:11434, which inside a container means the
       # container itself. Point it at the host instead, without touching
       # config.yaml (env beats yaml, and only this one key is overridden — see

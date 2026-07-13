@@ -10,6 +10,7 @@ from telegram.error import BadRequest
 import abliteratedllmbot.formatting as fmt
 from abliteratedllmbot.formatting import (
     finalize,
+    format_model_expiry,
     output_summary,
     rich_enabled,
     send_rich_message,
@@ -425,3 +426,45 @@ def test_banner_never_disagrees_with_finalize(make_cfg, base, gated):
     )
     claims_rich = "sendRichMessage" in output_summary(cfg)
     assert claims_rich is rich_enabled(cfg)
+
+
+# --- /status expiry ---------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+_NOW = datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
+
+
+def test_pinned_model_is_not_reported_as_an_imminent_unload():
+    """keep_alive=-1 -> Ollama emits a sentinel expiry (year 2318). The old code
+    printed only %H:%M:%S, turning "never" into a time that read as imminent."""
+    sentinel = datetime(2318, 10, 23, 11, 52, 15, tzinfo=timezone(timedelta(hours=4)))
+    out = format_model_expiry(sentinel, now=_NOW)
+    assert "pinned" in out and "no auto-unload" in out
+    assert "11:52" not in out
+
+
+def test_real_expiry_leads_with_a_timezone_proof_duration():
+    out = format_model_expiry(_NOW + timedelta(minutes=30), now=_NOW)
+    assert "auto-unloads in 30m" in out
+
+
+def test_real_expiry_over_an_hour_is_humanised():
+    assert "1h 30m" in format_model_expiry(_NOW + timedelta(minutes=90), now=_NOW)
+
+
+def test_absolute_time_is_rendered_in_OUR_zone_not_the_ollama_hosts():
+    """Ollama stamps expires_at with ITS host's offset; ours may differ. The same
+    instant must print as our local wall clock."""
+    same_instant_odd_offset = (_NOW + timedelta(minutes=30)).astimezone(
+        timezone(timedelta(hours=9))  # pretend the Ollama host is in Tokyo
+    )
+    ours = format_model_expiry(_NOW + timedelta(minutes=30), now=_NOW)
+    theirs = format_model_expiry(same_instant_odd_offset, now=_NOW)
+    assert ours == theirs  # identical instant -> identical rendering
+
+
+def test_expired_and_missing_are_not_crashes():
+    assert "expiring now" in format_model_expiry(_NOW - timedelta(minutes=1), now=_NOW)
+    assert format_model_expiry(None) == "unload time unknown"
+    assert format_model_expiry("garbage") == "unload time unknown"

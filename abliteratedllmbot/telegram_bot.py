@@ -22,7 +22,7 @@ from telegram.ext import (
 
 from .config import Settings
 from .errors import BotError
-from .formatting import output_summary
+from .formatting import format_model_expiry, output_summary
 from .history import (
     ContextUsage,
     InMemoryStore,
@@ -380,9 +380,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lines = ["🧠 Loaded models:"]
     for m in loaded:
         vram = (m.get("size_vram") or 0) / (1024 ** 3)
-        expires = m.get("expires_at")
-        when = expires.strftime("%H:%M:%S") if hasattr(expires, "strftime") else str(expires)
-        lines.append(f"• {m['model']} — {vram:.1f} GB VRAM, auto-unloads at {when}")
+        lines.append(
+            f"• {m['model']} — {vram:.1f} GB VRAM, {format_model_expiry(m.get('expires_at'))}"
+        )
     await update.effective_message.reply_text("\n".join(lines))
 
 

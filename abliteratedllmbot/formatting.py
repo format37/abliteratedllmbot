@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import List, Optional
 
@@ -28,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 # PTB convention: base ends in "/bot", the token is appended directly.
 OFFICIAL_API_BASE = "https://api.telegram.org/bot"
+
+# A keep_alive of -1 makes Ollama emit a sentinel expiry ~300 years out. Anything
+# further away than this is "never", not a real deadline.
+_PINNED_AFTER = timedelta(days=365)
 
 # Placeholder sentinels wrap a stash index; they contain no MarkdownV2 special
 # chars, so escape_markdown leaves them intact and we restore afterwards.
@@ -107,6 +112,37 @@ def to_expandable_blockquote(text: str) -> str:
     escaped = escape_markdown(text, version=2)  # escapes all specials, incl. literal > and |
     lines = escaped.split("\n")
     return "\n".join(">" + ln for ln in lines) + "||"
+
+
+def format_model_expiry(expires_at, now=None) -> str:
+    """Describe Ollama's ``expires_at`` for /status.
+
+    Two traps this exists to avoid:
+
+    1. A pinned model (``keep_alive`` negative) gets a sentinel far-future expiry —
+       Ollama returns year 2318. Printing only "%H:%M:%S" turned "never" into a
+       time-of-day that read as imminent. Say "pinned" instead.
+    2. The timestamp carries whatever offset the OLLAMA HOST is in, which is not
+       necessarily ours (our container is UTC). So lead with a RELATIVE duration,
+       which is timezone-proof, and render the absolute time in OUR local zone via
+       astimezone() — set TZ in the container to make that meaningful."""
+    if not hasattr(expires_at, "strftime"):
+        return "unload time unknown"
+
+    now = now or datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:  # naive -> assume it is in our local zone
+        expires_at = expires_at.astimezone()
+
+    delta = expires_at - now
+    if delta > _PINNED_AFTER:  # sentinel far-future -> keep_alive is negative
+        return "pinned in VRAM (no auto-unload)"
+    if delta <= timedelta(0):
+        return "expiring now"
+
+    mins = int(delta.total_seconds() // 60)
+    human = f"{mins // 60}h {mins % 60}m" if mins >= 60 else f"{mins}m"
+    local = expires_at.astimezone()  # OUR zone, not the Ollama host's
+    return f"auto-unloads in {human} (at {local.strftime('%H:%M %Z')})"
 
 
 def rich_enabled(cfg: Settings) -> bool:

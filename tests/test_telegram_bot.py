@@ -468,13 +468,30 @@ async def test_think_is_honest_when_globally_off(make_cfg):
 async def test_cmd_status_reports_loaded_model(make_cfg):
     import datetime
 
+    soon = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=25)
     ps = [{"model": "qwen3.6-abliterated:35b-a3b", "size_vram": 23 * 1024 ** 3,
-           "expires_at": datetime.datetime(2026, 7, 12, 22, 46, 28)}]
+           "expires_at": soon}]
     ctx = make_context(None, make_cfg(), ollama=FakeOllama(ps_result=ps))
     upd = make_update(chat_id=1)
     await tb.cmd_status(upd, ctx)
     r = upd.effective_message.replies[0]
-    assert "qwen3.6-abliterated:35b-a3b" in r and "23.0 GB VRAM" in r and "22:46:28" in r
+    assert "qwen3.6-abliterated:35b-a3b" in r and "23.0 GB VRAM" in r
+    assert "auto-unloads in 24m" in r or "auto-unloads in 25m" in r
+
+
+async def test_cmd_status_pinned_model_says_pinned(make_cfg):
+    """The regression that started this: keep_alive=-1 -> year-2318 sentinel, which
+    used to print as a time-of-day and read as an imminent unload."""
+    import datetime
+
+    ps = [{"model": "m", "size_vram": 1024 ** 3,
+           "expires_at": datetime.datetime(2318, 10, 23, 11, 52, 15,
+                                           tzinfo=datetime.timezone.utc)}]
+    ctx = make_context(None, make_cfg(), ollama=FakeOllama(ps_result=ps))
+    upd = make_update(chat_id=1)
+    await tb.cmd_status(upd, ctx)
+    r = upd.effective_message.replies[0]
+    assert "pinned in VRAM" in r and "11:52" not in r
 
 
 async def test_cmd_status_none_loaded(make_cfg):
