@@ -51,7 +51,9 @@ reasoning:
 memory:
   enabled: true
   max_turns: 20                # keep at most N user/assistant turns
-  max_tokens: 8192             # ...and stay under this estimated token budget
+  max_tokens: 6144             # MUST leave room for the answer: num_ctx(8192) - num_predict(2048).
+                               # Equal to num_ctx would let the prompt fill the whole window,
+                               # and Ollama would silently evict context mid-generation.
   chars_per_token: 2.5         # Cyrillic-aware estimate (lower than the naive 4)
   persist: false               # v1.1: SQLite persistence
   db_path: data/history.db

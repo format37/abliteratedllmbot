@@ -64,7 +64,10 @@ class ReasoningConfig(BaseModel):
 class MemoryConfig(BaseModel):
     enabled: bool = True
     max_turns: int = 20
-    max_tokens: int = 8192
+    # Prompt budget. MUST leave room for the answer inside num_ctx: the window holds
+    # prompt + output, so max_tokens ~= num_ctx - num_predict (8192 - 2048). Setting it
+    # to num_ctx lets the prompt fill the window and Ollama evicts context mid-answer.
+    max_tokens: int = 6144
     chars_per_token: float = 2.5             # Cyrillic-aware (lower than naive 4)
     persist: bool = False
     db_path: str = "data/history.db"

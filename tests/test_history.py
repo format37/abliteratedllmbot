@@ -8,6 +8,7 @@ from __future__ import annotations
 from abliteratedllmbot.config import MemoryConfig
 from abliteratedllmbot.history import (
     ContextUsage,
+    estimate_context_usage,
     InMemoryStore,
     Message,
     build_messages,
@@ -223,3 +224,38 @@ def test_is_tight_when_next_answer_cannot_fit():
     tight = ContextUsage(prompt=6000, answer=500, limit=8192)  # 1692 free < 2048
     assert roomy.is_tight(num_predict) is False
     assert tight.is_tight(num_predict) is True
+
+
+# --- estimate_context_usage (fresh chat, no tokenizer count yet) -------------
+
+def test_fresh_chat_still_reports_the_system_prompt_occupancy():
+    """A fresh chat is NOT empty: the system prompt already sits in the window.
+    Reporting "no stats" hid that."""
+    mem = MemoryConfig(enabled=True, chars_per_token=2.5)
+    u = estimate_context_usage("You are helpful." * 10, [], mem, limit=8192)
+    assert u.exact is False
+    assert u.prompt > 0 and u.answer == 0
+    assert 0 < u.percent < 100
+    assert u.headroom == 8192 - u.prompt
+
+
+def test_estimate_includes_stored_history():
+    mem = MemoryConfig(enabled=True, chars_per_token=2.5)
+    hist = [Message("user", "x" * 250), Message("assistant", "y" * 250)]
+    bare = estimate_context_usage("sys", [], mem, limit=8192)
+    with_hist = estimate_context_usage("sys", hist, mem, limit=8192)
+    assert with_hist.prompt > bare.prompt
+
+
+def test_estimate_ignores_history_when_memory_disabled():
+    mem = MemoryConfig(enabled=False, chars_per_token=2.5)
+    hist = [Message("user", "x" * 500)]
+    assert estimate_context_usage("sys", hist, mem, limit=8192).prompt == (
+        estimate_context_usage("sys", [], mem, limit=8192).prompt
+    )
+
+
+def test_empty_system_prompt_and_no_history_is_zero():
+    mem = MemoryConfig(enabled=True, chars_per_token=2.5)
+    u = estimate_context_usage("", [], mem, limit=8192)
+    assert u.used == 0 and u.percent == 0.0

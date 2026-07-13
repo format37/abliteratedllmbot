@@ -23,7 +23,13 @@ from telegram.ext import (
 from .config import Settings
 from .errors import BotError
 from .formatting import output_summary
-from .history import ContextUsage, InMemoryStore, Message, build_messages
+from .history import (
+    ContextUsage,
+    InMemoryStore,
+    Message,
+    build_messages,
+    estimate_context_usage,
+)
 from .ollama_client import OllamaClient
 from .streaming import RenderDriver
 
@@ -425,38 +431,46 @@ async def _edit_or_reply(sent, update: Update, text: str) -> None:
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    last = context.bot_data.get("_last_stats", {}).get(chat_id)
-    if not last:
-        await update.effective_message.reply_text("No generation stats yet.")
-        return
     cfg: Settings = context.bot_data["cfg"]
-    s = last["stats"]
-    lines = [f"📊 Last generation ({last.get('done_reason')}):"]
-    ec, ed = s.get("eval_count"), s.get("eval_duration")
-    if ec and ed:
-        lines.append(f"• {ec} tokens in {ed / 1e9:.1f}s = {ec / (ed / 1e9):.1f} tok/s")
-    if s.get("prompt_eval_count"):
-        lines.append(f"• prompt: {s['prompt_eval_count']} tokens")
-    if s.get("load_duration"):
-        lines.append(f"• model load: {s['load_duration'] / 1e9:.1f}s")
+    store: InMemoryStore = context.bot_data["history"]
+    last = context.bot_data.get("_last_stats", {}).get(chat_id)
+    opts = cfg.ollama.options
 
-    # Context occupancy from the model's OWN tokenizer (prompt_eval_count is the full
-    # prompt, not just post-cache tokens), so this is exact rather than a guess.
-    pec = s.get("prompt_eval_count")
-    if pec:
-        u = ContextUsage(prompt=pec, answer=ec or 0, limit=cfg.ollama.options.num_ctx)
-        lines += [
-            "",
-            f"🧠 Context: {u.bar()} {u.percent:.0f}%",
-            f"• {u.used} / {u.limit} tokens used ({u.headroom} free)",
-        ]
-        if u.is_tight(cfg.ollama.options.num_predict):
-            lines.append(
-                f"⚠️ Less than num_predict ({cfg.ollama.options.num_predict}) left — the next "
-                "answer may be cut short and the oldest turns evicted. /reset to clear."
-            )
-        turns = len(context.bot_data["history"].get(chat_id)) // 2
-        lines.append(f"• memory: {turns}/{cfg.memory.max_turns} turns kept")
+    lines: List[str] = []
+    usage: ContextUsage
+
+    if last and last["stats"].get("prompt_eval_count"):
+        # Exact: prompt_eval_count is the model's own tokenizer count of the full prompt.
+        s = last["stats"]
+        ec, ed = s.get("eval_count"), s.get("eval_duration")
+        lines.append(f"📊 Last generation ({last.get('done_reason')}):")
+        if ec and ed:
+            lines.append(f"• {ec} tokens in {ed / 1e9:.1f}s = {ec / (ed / 1e9):.1f} tok/s")
+        lines.append(f"• prompt: {s['prompt_eval_count']} tokens")
+        if s.get("load_duration"):
+            lines.append(f"• model load: {s['load_duration'] / 1e9:.1f}s")
+        lines.append("")
+        usage = ContextUsage(prompt=s["prompt_eval_count"], answer=ec or 0, limit=opts.num_ctx)
+    else:
+        # Fresh chat: no tokenizer count yet, but the window is not empty (system prompt)
+        # and the limit is known. Estimate rather than say "no stats" and show nothing.
+        lines.append("📊 No generation in this chat yet.")
+        usage = estimate_context_usage(cfg.system_prompt, store.get(chat_id), cfg.memory, opts.num_ctx)
+
+    approx = "" if usage.exact else "~"
+    lines += [
+        f"🧠 Context: {usage.bar()} {approx}{usage.percent:.0f}%",
+        f"• {approx}{usage.used} / {usage.limit} tokens used ({approx}{usage.headroom} free)",
+    ]
+    if usage.is_tight(opts.num_predict):
+        lines.append(
+            f"⚠️ Less than num_predict ({opts.num_predict}) left — the next answer may be cut "
+            "short and the oldest turns evicted. /reset to clear."
+        )
+    turns = len(store.get(chat_id)) // 2
+    lines.append(f"• memory: {turns}/{cfg.memory.max_turns} turns kept")
+    if not usage.exact:
+        lines.append("• (estimated — exact counts appear after the first answer)")
     await update.effective_message.reply_text("\n".join(lines))
 
 

@@ -71,6 +71,10 @@ class ContextUsage:
     prompt: int
     answer: int
     limit: int          # ollama.options.num_ctx
+    # False before the first generation of a chat: no tokenizer count exists yet, so the
+    # figure is a chars_per_token estimate. Shown with "~" rather than hidden — a fresh
+    # chat still occupies the window (system prompt), and "no stats" told the user nothing.
+    exact: bool = True
 
     @property
     def used(self) -> int:
@@ -94,6 +98,22 @@ class ContextUsage:
     def is_tight(self, num_predict: int) -> bool:
         """True when the next answer can no longer fit -> oldest turns get evicted."""
         return self.headroom < num_predict
+
+
+def estimate_context_usage(
+    system_prompt: str,
+    history: List[Message],
+    memory: MemoryConfig,
+    limit: int,
+) -> ContextUsage:
+    """Occupancy WITHOUT a tokenizer count — for a chat that has not generated yet.
+
+    Uses the same chars_per_token estimate the trimmer runs on, so /stats agrees with
+    what trim_history will actually do. Marked inexact so the UI can say so."""
+    tokens = estimate_tokens(system_prompt, memory.chars_per_token) if system_prompt else 0
+    if memory.enabled:
+        tokens += sum(estimate_tokens(m.content, memory.chars_per_token) for m in history)
+    return ContextUsage(prompt=tokens, answer=0, limit=limit, exact=False)
 
 
 def _split_system(history: List[Message]):

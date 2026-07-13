@@ -297,11 +297,17 @@ async def test_cmd_stats_reports_tokens_per_second(make_cfg):
     assert "100.0 tok/s" in reply and "prompt: 15" in reply
 
 
-async def test_cmd_stats_without_data(make_cfg):
+async def test_cmd_stats_without_data_still_reports_context(make_cfg):
+    """A fresh chat has no tokenizer counts, but the window is not empty (system
+    prompt) and the limit is known — report an estimate instead of nothing."""
     cfg = make_cfg()
     upd = make_update(chat_id=5)
     await tb.cmd_stats(upd, make_context(None, cfg))
-    assert "No generation stats" in upd.effective_message.replies[0]
+    reply = upd.effective_message.replies[0]
+    assert "No generation in this chat yet" in reply
+    assert "Context:" in reply                      # the gauge is present ...
+    assert f"/ {cfg.ollama.options.num_ctx} tokens" in reply
+    assert "~" in reply and "estimated" in reply    # ... and honestly marked inexact
 
 
 # --- image handling (SPEC §9) ----------------------------------------------
