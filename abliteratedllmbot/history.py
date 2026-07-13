@@ -55,6 +55,47 @@ def calibrate_chars_per_token(
     return max(floor, min(ceil, total_chars / prompt_eval_count))
 
 
+@dataclass
+class ContextUsage:
+    """How full the model's context window is, from REAL tokenizer counts.
+
+    ``prompt_eval_count`` is the whole prompt, not just the tokens newly evaluated
+    after a KV-cache hit (verified against Ollama: it grows with the prompt), so it
+    is a truthful occupancy measure rather than an estimate.
+
+    ``used`` is prompt + answer: that is what sits in the window when generation ends,
+    and what the NEXT turn's prompt carries forward. ``headroom`` is what is left for
+    the next answer — if it drops below num_predict, the model cannot produce a full
+    reply and Ollama starts evicting the oldest context."""
+
+    prompt: int
+    answer: int
+    limit: int          # ollama.options.num_ctx
+
+    @property
+    def used(self) -> int:
+        return self.prompt + self.answer
+
+    @property
+    def percent(self) -> float:
+        return 100.0 * self.used / self.limit if self.limit > 0 else 0.0
+
+    @property
+    def headroom(self) -> int:
+        return max(0, self.limit - self.used)
+
+    def bar(self, width: int = 10) -> str:
+        """A coarse ▓/░ gauge — 'vague but useful' at a glance."""
+        if self.limit <= 0:
+            return "░" * width
+        filled = min(width, round(width * self.used / self.limit))
+        return "▓" * filled + "░" * (width - filled)
+
+    def is_tight(self, num_predict: int) -> bool:
+        """True when the next answer can no longer fit -> oldest turns get evicted."""
+        return self.headroom < num_predict
+
+
 def _split_system(history: List[Message]):
     """Peel off a leading system message (kept verbatim) from the u/a body."""
     if history and history[0].role == "system":

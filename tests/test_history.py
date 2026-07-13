@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from abliteratedllmbot.config import MemoryConfig
 from abliteratedllmbot.history import (
+    ContextUsage,
     InMemoryStore,
     Message,
     build_messages,
@@ -180,3 +181,45 @@ def test_calibrate_clamps_degenerate_values():
     assert calibrate_chars_per_token(1000, 1) == 6.0    # ceil
     assert calibrate_chars_per_token(1, 1000) == 1.5    # floor
     assert 1.5 <= calibrate_chars_per_token(0, 0) <= 6.0  # no div-by-zero
+
+
+# --- ContextUsage (the /stats occupancy gauge) -------------------------------
+
+def test_context_usage_basic_math():
+    u = ContextUsage(prompt=1000, answer=500, limit=8192)
+    assert u.used == 1500
+    assert round(u.percent) == 18
+    assert u.headroom == 8192 - 1500
+
+
+def test_context_usage_counts_the_answer_not_just_the_prompt():
+    """The answer stays in the window and is carried into the next prompt."""
+    assert ContextUsage(prompt=1000, answer=2000, limit=8192).used == 3000
+
+
+def test_context_usage_bar_is_proportional():
+    assert ContextUsage(prompt=0, answer=0, limit=100).bar(10) == "░" * 10
+    assert ContextUsage(prompt=50, answer=0, limit=100).bar(10) == "▓" * 5 + "░" * 5
+    assert ContextUsage(prompt=100, answer=0, limit=100).bar(10) == "▓" * 10
+
+
+def test_context_usage_bar_never_overflows_when_context_is_exceeded():
+    """Ollama evicts rather than erroring, so used > limit is reachable. Don't emit
+    a 30-char bar or a negative headroom in that state."""
+    u = ContextUsage(prompt=9000, answer=3000, limit=8192)
+    assert len(u.bar(10)) == 10 and u.bar(10) == "▓" * 10
+    assert u.headroom == 0
+    assert u.percent > 100  # honest: report the overflow rather than clamping to 100
+
+
+def test_context_usage_zero_limit_does_not_divide_by_zero():
+    u = ContextUsage(prompt=100, answer=0, limit=0)
+    assert u.percent == 0.0 and u.bar(10) == "░" * 10 and u.headroom == 0
+
+
+def test_is_tight_when_next_answer_cannot_fit():
+    num_predict = 2048
+    roomy = ContextUsage(prompt=1000, answer=500, limit=8192)
+    tight = ContextUsage(prompt=6000, answer=500, limit=8192)  # 1692 free < 2048
+    assert roomy.is_tight(num_predict) is False
+    assert tight.is_tight(num_predict) is True

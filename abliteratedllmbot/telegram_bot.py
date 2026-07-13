@@ -23,7 +23,7 @@ from telegram.ext import (
 from .config import Settings
 from .errors import BotError
 from .formatting import output_summary
-from .history import InMemoryStore, Message, build_messages
+from .history import ContextUsage, InMemoryStore, Message, build_messages
 from .ollama_client import OllamaClient
 from .streaming import RenderDriver
 
@@ -429,6 +429,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not last:
         await update.effective_message.reply_text("No generation stats yet.")
         return
+    cfg: Settings = context.bot_data["cfg"]
     s = last["stats"]
     lines = [f"📊 Last generation ({last.get('done_reason')}):"]
     ec, ed = s.get("eval_count"), s.get("eval_duration")
@@ -438,6 +439,24 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append(f"• prompt: {s['prompt_eval_count']} tokens")
     if s.get("load_duration"):
         lines.append(f"• model load: {s['load_duration'] / 1e9:.1f}s")
+
+    # Context occupancy from the model's OWN tokenizer (prompt_eval_count is the full
+    # prompt, not just post-cache tokens), so this is exact rather than a guess.
+    pec = s.get("prompt_eval_count")
+    if pec:
+        u = ContextUsage(prompt=pec, answer=ec or 0, limit=cfg.ollama.options.num_ctx)
+        lines += [
+            "",
+            f"🧠 Context: {u.bar()} {u.percent:.0f}%",
+            f"• {u.used} / {u.limit} tokens used ({u.headroom} free)",
+        ]
+        if u.is_tight(cfg.ollama.options.num_predict):
+            lines.append(
+                f"⚠️ Less than num_predict ({cfg.ollama.options.num_predict}) left — the next "
+                "answer may be cut short and the oldest turns evicted. /reset to clear."
+            )
+        turns = len(context.bot_data["history"].get(chat_id)) // 2
+        lines.append(f"• memory: {turns}/{cfg.memory.max_turns} turns kept")
     await update.effective_message.reply_text("\n".join(lines))
 
 
