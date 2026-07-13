@@ -81,7 +81,14 @@ sanitize:
   extra_tokens: []             # additional literal strings to strip
 
 images:
-  mode: reject_note            # reject_note | caption_only | vision_fallback
+  # reject_note | caption_only | vision_fallback
+  # NOTE: this is pure config — the bot never probes what the model can actually
+  # see. reject_note replies with `note` and DROPS the photo (only the caption is
+  # forwarded), even if ollama.model is a VLM. If you point ollama.model or
+  # vision_model at a vision model, switch this to vision_fallback or images stay
+  # ignored. vision_fallback is stateless (the image turn is not stored in
+  # history), so ask your question in the photo's CAPTION, not a follow-up message.
+  mode: reject_note
   note: "⚠️ The current model can't see images. Answering from your text only…"
 
 typing:
