@@ -9,6 +9,7 @@ from telegram.error import BadRequest
 
 import abliteratedllmbot.formatting as fmt
 from abliteratedllmbot.formatting import (
+    edit_rich_message,
     finalize,
     format_model_expiry,
     normalize_math_delimiters,
@@ -425,7 +426,7 @@ def test_banner_never_disagrees_with_finalize(make_cfg, base, gated):
         formatting={"finalize_mode": "rich", "rich_requires_base_url": gated},
         telegram={"base_url": base},
     )
-    claims_rich = "sendRichMessage" in output_summary(cfg)
+    claims_rich = "DEGRADED" not in output_summary(cfg)
     assert claims_rich is rich_enabled(cfg)
 
 
@@ -547,3 +548,79 @@ async def test_finalize_rich_normalizes_math_even_with_reasoning(make_bot, make_
     cfg = make_cfg(formatting={"finalize_mode": "rich"}, telegram={"base_url": None})
     await finalize(make_bot(), cfg, 1, r"$ a = 1 $", [1000], reasoning="thinking")
     assert r"$a = 1$" in seen["md"] and "$ a = 1 $" not in seen["md"]
+
+
+# --- finalize by EDITING (Bot API 10.1: editMessageText takes rich_message) --
+# There is no editRichMessage method (404) — the capability lives on editMessageText.
+# Editing in place beats send+delete: the answer keeps its slot in the chat, no
+# flicker, no second notification.
+
+async def test_edit_rich_posts_to_edit_message_text(make_cfg, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+    cfg = make_cfg(telegram={"base_url": None})
+    monkeypatch.setattr(fmt.httpx, "AsyncClient", lambda **kw: _FakeHTTP(data={"ok": True}))
+    assert await edit_rich_message(cfg, 7, 42, "**hi**") is True
+    p = _FakeHTTP.last_payload
+    assert p["url"] == "https://api.telegram.org/botTESTTOKEN/editMessageText"
+    assert p["json"]["message_id"] == 42
+    assert p["json"]["rich_message"] == {"markdown": "**hi**"}
+
+
+async def test_edit_rich_treats_not_modified_as_success(make_cfg, monkeypatch):
+    """A markup-free answer renders identically to the streamed plain text. Telegram
+    calls that an error; on screen it is already correct."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "T")
+    cfg = make_cfg(telegram={"base_url": None})
+    monkeypatch.setattr(fmt.httpx, "AsyncClient", lambda **kw: _FakeHTTP(
+        data={"ok": False, "description": "Bad Request: message is not modified"}))
+    assert await edit_rich_message(cfg, 1, 2, "plain") is True
+
+
+async def test_finalize_rich_edits_in_place_and_does_not_resend(make_bot, make_cfg, monkeypatch):
+    sent = {"n": 0}
+
+    async def fake_send(*a, **k):
+        sent["n"] += 1
+        return True
+
+    async def fake_edit(cfg, chat_id, message_id, md):
+        sent["edited"] = message_id
+        return True
+
+    monkeypatch.setattr(fmt, "send_rich_message", fake_send)
+    monkeypatch.setattr(fmt, "edit_rich_message", fake_edit)
+    bot = make_bot()
+    cfg = make_cfg(formatting={"finalize_mode": "rich"}, telegram={"base_url": None})
+    await finalize(bot, cfg, 1, "hello", [1000])
+    assert sent["edited"] == 1000      # the streamed message was upgraded ...
+    assert sent["n"] == 0              # ... not re-sent
+    assert bot.deleted == set()        # ... and not deleted
+
+
+async def test_finalize_rich_collapses_rollover_into_the_first_message(make_bot, make_cfg, monkeypatch):
+    """Rich holds 32768 chars, so an answer that rolled over several 4096-char scratch
+    messages collapses back into the first; the extras must be cleaned up."""
+    async def fake_edit(cfg, chat_id, message_id, md):
+        return True
+
+    monkeypatch.setattr(fmt, "edit_rich_message", fake_edit)
+    bot = make_bot()
+    cfg = make_cfg(formatting={"finalize_mode": "rich"}, telegram={"base_url": None})
+    await finalize(bot, cfg, 1, "hello", [1000, 1001, 1002])
+    assert bot.deleted == {1001, 1002}  # first kept (edited), the rest removed
+
+
+async def test_finalize_falls_back_to_send_when_the_edit_is_refused(make_bot, make_cfg, monkeypatch):
+    """e.g. the message is too old to edit -> the original send+delete path."""
+    async def fake_edit(*a, **k):
+        return False
+
+    async def fake_send(*a, **k):
+        return True
+
+    monkeypatch.setattr(fmt, "edit_rich_message", fake_edit)
+    monkeypatch.setattr(fmt, "send_rich_message", fake_send)
+    bot = make_bot()
+    cfg = make_cfg(formatting={"finalize_mode": "rich"}, telegram={"base_url": None})
+    await finalize(bot, cfg, 1, "hello", [1000])
+    assert bot.deleted == {1000}  # scratch removed, because a NEW message replaced it

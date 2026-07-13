@@ -197,7 +197,7 @@ def output_summary(cfg: Settings) -> str:
         )
     if mode == "rich":
         target = cfg.telegram.base_url or OFFICIAL_API_BASE
-        return f"finalize=rich via sendRichMessage ({target}) -> LaTeX/tables render"
+        return f"finalize=rich, edited in place ({target}) -> LaTeX/tables render"
     return f"finalize={mode} -> LaTeX will NOT render, maths arrives as raw $$"
 
 
@@ -230,6 +230,43 @@ async def send_rich_message(
         return False
     except Exception as exc:  # network / json / anything -> fall back
         logger.warning("sendRichMessage error: %s", exc)
+        return False
+
+
+async def edit_rich_message(
+    cfg: Settings, chat_id: int, message_id: int, markdown_text: str
+) -> bool:
+    """POST editMessageText with a ``rich_message`` — Bot API 10.1 added that parameter,
+    so a rich message can be edited IN PLACE. There is no ``editRichMessage`` method
+    (404); the capability lives on editMessageText. Verified against the live API.
+
+    This lets finalize upgrade the streamed message rather than send a new one and
+    delete the scratch, so the answer keeps its position in the chat and there is no
+    delete/re-send flicker (and no second notification)."""
+    base_url = cfg.telegram.base_url or OFFICIAL_API_BASE
+    token = cfg.telegram_bot_token
+    if not token:
+        return False
+    url = f"{base_url}{token}/editMessageText"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "rich_message": {"markdown": markdown_text},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, json=payload)
+        data = resp.json()
+        if data.get("ok"):
+            return True
+        # The streamed plain text can already equal the rendered result (an answer with
+        # no markup at all). Nothing to change, and what is on screen is correct.
+        if "message is not modified" in str(data.get("description", "")):
+            return True
+        logger.warning("editMessageText(rich) rejected: %s", data)
+        return False
+    except Exception as exc:  # network / json / anything -> fall back
+        logger.warning("editMessageText(rich) error: %s", exc)
         return False
 
 
@@ -361,6 +398,18 @@ async def finalize(
         if reasoning:  # rich messages take standard Markdown; a '>' blockquote for reasoning
             quoted = "\n".join("> " + ln for ln in f"{_REASONING_HEADER}\n{reasoning}".split("\n"))
             rich_md = quoted + "\n\n" + rich_md
+
+        # Upgrade the streamed message IN PLACE (Bot API 10.1: editMessageText takes a
+        # rich_message). Beats send-a-new-one-and-delete-the-scratch: the answer keeps
+        # its position in the chat, there is no delete/re-send flicker, and no second
+        # notification. Rich holds 32768 chars, so a rolled-over answer collapses back
+        # into the first message and the extra scratch messages go away.
+        if await edit_rich_message(cfg, chat_id, scratch_message_ids[0], rich_md):
+            for mid in scratch_message_ids[1:]:
+                await _safe_delete(bot, chat_id, mid)
+            return
+
+        # Edit refused (e.g. the message is too old to edit) -> the original path.
         if await send_rich_message(cfg, chat_id, rich_md):
             for mid in scratch_message_ids:
                 await _safe_delete(bot, chat_id, mid)
