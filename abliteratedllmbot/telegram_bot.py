@@ -5,15 +5,17 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import logging
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Tuple
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.error import Conflict, TelegramError
+from telegram.error import BadRequest, Conflict, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -50,13 +52,24 @@ def access_control(cfg: Settings) -> Callable:
             user = update.effective_user
             if user and user.id in allowed:
                 return await handler(update, context)
+
+            # A denied *button* press is refused in the callback answer, not as a chat
+            # message: an unanswered callback query spins in the client forever, and
+            # under a silent policy the ack must stay silent too.
+            query = getattr(update, "callback_query", None)
+
             if policy == "ignore":
+                await _answer_query(query)
                 return None
             notified: set = context.bot_data.setdefault("_denied_notified", set())
             if policy == "reply_once" and user and user.id in notified:
+                await _answer_query(query)
                 return None
             if user:
                 notified.add(user.id)
+            if query is not None:
+                await _answer_query(query, cfg.access.denial_message)
+                return None
             message = update.effective_message
             if message is not None:
                 try:
@@ -68,6 +81,16 @@ def access_control(cfg: Settings) -> Callable:
         return wrapper
 
     return decorator
+
+
+async def _answer_query(query, text: str = "") -> None:
+    """Acknowledge a callback query (no-op for a non-callback update)."""
+    if query is None:
+        return
+    try:
+        await query.answer(text, show_alert=bool(text))
+    except TelegramError as exc:
+        logger.debug("callback answer failed: %s", exc)
 
 
 # --- typing indicator (SPEC §8) --------------------------------------------
@@ -135,15 +158,34 @@ async def on_shutdown(app: Application) -> None:
 
 # --- the generation flow (SPEC §8) -----------------------------------------
 
-def _chat_cfg(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Settings:
-    """Apply the per-chat /think toggle (SPEC §11) without mutating shared Settings."""
+def _qualify(model: str) -> str:
+    """Tag a model name the way Ollama reports it. ``/api/tags`` and ``/api/ps`` always
+    answer fully-qualified (a config of ``gemma3`` comes back as ``gemma3:latest``), so a
+    bare name would match nothing we compare it against: no ✅ in the picker, and — worse —
+    ``old in resident`` false, so the old model is silently never unloaded and both stay
+    pinned in VRAM. A ':' may only appear in the last path segment (registry/name:tag)."""
+    _, _, tail = model.rpartition("/")
+    return model if ":" in tail else f"{model}:latest"
+
+
+def active_model(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
+    """The model this chat talks to: its /model choice, else the configured default."""
     cfg: Settings = context.bot_data["cfg"]
+    return _qualify(context.bot_data.get("_model", {}).get(chat_id) or cfg.ollama.model)
+
+
+def _chat_cfg(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Settings:
+    """Fold this chat's overrides — /think and /model — into a copy of the shared
+    Settings, which is never mutated. (SPEC §11)"""
+    cfg: Settings = context.bot_data["cfg"]
+    overrides: dict = {}
     hidden: set = context.bot_data.get("_think_off", set())
     if chat_id in hidden and cfg.reasoning.show_thinking:
-        return cfg.model_copy(
-            update={"reasoning": cfg.reasoning.model_copy(update={"show_thinking": False})}
-        )
-    return cfg
+        overrides["reasoning"] = cfg.reasoning.model_copy(update={"show_thinking": False})
+    chosen = active_model(context, chat_id)
+    if chosen != cfg.ollama.model:
+        overrides["ollama"] = cfg.ollama.model_copy(update={"model": chosen})
+    return cfg.model_copy(update=overrides) if overrides else cfg
 
 
 def _dispatch_generation(
@@ -198,6 +240,10 @@ async def _run_generation(
     client: OllamaClient = context.bot_data["ollama"]
     store: InMemoryStore = context.bot_data["history"]
     bot = context.bot
+
+    # None -> this chat's active model (/model). An explicit model (the vision path)
+    # is a deliberate one-turn override and still wins.
+    model = model or cfg.ollama.model
 
     typing = TypingIndicator(bot, chat_id, cfg) if cfg.typing.enabled else None
     if typing is not None:
@@ -306,11 +352,11 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # --- commands (SPEC §11) ----------------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg: Settings = context.bot_data["cfg"]
+    model = active_model(context, update.effective_chat.id)
     user = update.effective_user
     who = f" You are user `{user.id}`." if user else ""
     await update.effective_message.reply_text(
-        f"👋 I'm a local uncensored LLM bot backed by `{cfg.ollama.model}`.{who}\n"
+        f"👋 I'm a local uncensored LLM bot backed by `{model}`.{who}\n"
         "Send me a message and I'll stream the answer. /help for commands."
     )
 
@@ -326,6 +372,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if cfg.commands.enable_stats:  # only advertise /stats if it's actually registered
         lines.append("/stats — last generation's tokens/sec")
     lines.append("/think — toggle showing the model's reasoning")
+    if cfg.commands.allow_model_switch:
+        lines.append("/model — pick the model this chat talks to")
     if cfg.commands.enable_model_admin:
         lines += [
             "/status — which models Ollama has loaded",
@@ -362,7 +410,7 @@ async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Report which models Ollama currently holds in memory (GET /api/ps)."""
-    cfg: Settings = context.bot_data["cfg"]
+    model = active_model(context, update.effective_chat.id)
     client: Optional[OllamaClient] = context.bot_data.get("ollama")
     if client is None:
         await update.effective_message.reply_text("Model backend is not ready yet.")
@@ -374,47 +422,51 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     if not loaded:
         await update.effective_message.reply_text(
-            f"💤 No model loaded. Default is {cfg.ollama.model} — /load to warm it."
+            f"💤 No model loaded. This chat uses {model} — /load to warm it."
         )
         return
     lines = ["🧠 Loaded models:"]
     for m in loaded:
         vram = (m.get("size_vram") or 0) / (1024 ** 3)
+        # Several models can be resident at once now that /model exists — say which
+        # one this chat is actually talking to.
+        mine = "  ← this chat" if m["model"] == model else ""
         lines.append(
-            f"• {m['model']} — {vram:.1f} GB VRAM, {format_model_expiry(m.get('expires_at'))}"
+            f"• {m['model']} — {vram:.1f} GB VRAM, "
+            f"{format_model_expiry(m.get('expires_at'))}{mine}"
         )
     await update.effective_message.reply_text("\n".join(lines))
 
 
 async def cmd_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg: Settings = context.bot_data["cfg"]
+    model = active_model(context, update.effective_chat.id)
     client: Optional[OllamaClient] = context.bot_data.get("ollama")
     if client is None:
         await update.effective_message.reply_text("Model backend is not ready yet.")
         return
     notice = await update.effective_message.reply_text(
-        f"⏳ Loading {cfg.ollama.model} … first cold load takes ~2.5 min."
+        f"⏳ Loading {model} … first cold load takes ~2.5 min."
     )
     try:
-        await client.load()
+        await client.load(model)
     except BotError as exc:
         await _edit_or_reply(notice, update, f"⚠️ {exc}")
         return
-    await _edit_or_reply(notice, update, f"✅ {cfg.ollama.model} is loaded and warm.")
+    await _edit_or_reply(notice, update, f"✅ {model} is loaded and warm.")
 
 
 async def cmd_unload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg: Settings = context.bot_data["cfg"]
+    model = active_model(context, update.effective_chat.id)
     client: Optional[OllamaClient] = context.bot_data.get("ollama")
     if client is None:
         await update.effective_message.reply_text("Model backend is not ready yet.")
         return
     try:
-        await client.unload()
+        await client.unload(model)
     except BotError as exc:
         await update.effective_message.reply_text(f"⚠️ {exc}")
         return
-    await update.effective_message.reply_text(f"💤 {cfg.ollama.model} unloaded from memory.")
+    await update.effective_message.reply_text(f"💤 {model} unloaded from memory.")
 
 
 async def _edit_or_reply(sent, update: Update, text: str) -> None:
@@ -427,6 +479,216 @@ async def _edit_or_reply(sent, update: Update, text: str) -> None:
     except TelegramError as exc:
         logger.debug("edit placeholder failed: %s", exc)
     await update.effective_message.reply_text(text)
+
+
+# --- /model: the paged picker (SPEC §11) ------------------------------------
+
+_MODEL_PAGE = "mdl:p:"     # page navigation
+_MODEL_PICK = "mdl:s:"     # a model button
+_MODEL_NOOP = "mdl:noop"   # the page counter — inert, but must still be answered
+
+
+def _model_token(name: str) -> str:
+    """A short id for a model name. ``callback_data`` is capped at 64 BYTES and model
+    names run long (`dagbs/deepseek-coder-v2-lite-instruct:latest`), so buttons carry a
+    digest and ``bot_data['_model_tokens']`` maps it back to the exact name shown."""
+    return hashlib.blake2s(name.encode(), digest_size=8).hexdigest()
+
+
+def _render_model_page(
+    models: List[str],
+    page: int,
+    current: str,
+    per_page: int,
+    tokens: dict,
+) -> Tuple[str, InlineKeyboardMarkup]:
+    """One page of the picker: a row per full model name, then the nav row. The page
+    is clamped, so a stale callback can never scroll past either end."""
+    pages = max(1, -(-len(models) // per_page))  # ceil-div
+    page = min(max(page, 0), pages - 1)
+
+    rows: List[List[InlineKeyboardButton]] = []
+    for name in models[page * per_page : (page + 1) * per_page]:
+        token = _model_token(name)
+        tokens[token] = name
+        mark = "✅ " if name == current else ""
+        rows.append(
+            [InlineKeyboardButton(f"{mark}{name}", callback_data=_MODEL_PICK + token)]
+        )
+
+    if pages > 1:  # one page needs no navigation at all
+        nav = []
+        if page > 0:  # no left arrow on the first page
+            nav.append(InlineKeyboardButton("◀", callback_data=f"{_MODEL_PAGE}{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data=_MODEL_NOOP))
+        if page < pages - 1:  # no right arrow on the last page
+            nav.append(InlineKeyboardButton("▶", callback_data=f"{_MODEL_PAGE}{page + 1}"))
+        rows.append(nav)
+
+    header = f"🧠 {len(models)} model{'' if len(models) == 1 else 's'} available"
+    if pages > 1:
+        header += f" — page {page + 1} of {pages}"
+    return f"{header}\nCurrent: {current}", InlineKeyboardMarkup(rows)
+
+
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Open the picker on the page that holds the chat's current model."""
+    cfg: Settings = context.bot_data["cfg"]
+    client: Optional[OllamaClient] = context.bot_data.get("ollama")
+    if client is None:
+        await update.effective_message.reply_text("Model backend is not ready yet.")
+        return
+    try:
+        models = await client.chat_models()
+    except BotError as exc:
+        await update.effective_message.reply_text(f"⚠️ {exc}")
+        return
+    if not models:
+        await update.effective_message.reply_text(
+            f"No chat-capable models are installed on {cfg.ollama.host}."
+        )
+        return
+
+    context.bot_data["_models"] = models  # snapshot: paging must not re-hit Ollama
+    chat_id = update.effective_chat.id
+    current = active_model(context, chat_id)
+    per_page = cfg.commands.models_per_page
+    page = models.index(current) // per_page if current in models else 0
+    text, keyboard = _render_model_page(
+        models, page, current, per_page,
+        context.bot_data.setdefault("_model_tokens", {}),
+    )
+    await update.effective_message.reply_text(text, reply_markup=keyboard)
+
+
+async def on_model_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback router for the picker's keyboard: page nav, counter, selection."""
+    query = update.callback_query
+    data = query.data or ""
+    chat_id = update.effective_chat.id
+    cfg: Settings = context.bot_data["cfg"]
+
+    if data == _MODEL_NOOP:  # answer it or the client spins on the button forever
+        await query.answer()
+        return
+
+    if data.startswith(_MODEL_PAGE):
+        await query.answer()
+        try:
+            page = int(data[len(_MODEL_PAGE):])
+        except ValueError:
+            return
+        models: List[str] = context.bot_data.get("_models") or []
+        if not models:  # the menu outlived a restart; its snapshot did not
+            await _edit_menu(query, "This menu is stale — send /model again.")
+            return
+        text, keyboard = _render_model_page(
+            models, page, active_model(context, chat_id), cfg.commands.models_per_page,
+            context.bot_data.setdefault("_model_tokens", {}),
+        )
+        try:
+            await query.edit_message_text(text, reply_markup=keyboard)
+        except BadRequest as exc:  # "message is not modified" — a double-tapped arrow
+            logger.debug("model page edit skipped: %s", exc)
+        return
+
+    if data.startswith(_MODEL_PICK):
+        name = context.bot_data.get("_model_tokens", {}).get(data[len(_MODEL_PICK):])
+        if name is None:  # token minted by a previous process
+            await query.answer("This menu is stale — send /model again.", show_alert=True)
+            return
+        await query.answer()
+        await _switch_model(update, context, chat_id, name)
+
+
+async def _switch_model(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, new: str
+) -> None:
+    """Unload the old model, warm the new one, then confirm. A failed load is rolled
+    back, so a switch that never loaded is not a switch."""
+    query = update.callback_query
+    client: OllamaClient = context.bot_data["ollama"]
+    switching: dict = context.bot_data.setdefault("_switching", {})
+
+    # A warm-up parks here for ~2.5 min, and PTB dispatches every update concurrently, so
+    # a second tap would otherwise start a second unload/load pair: both models resident
+    # (the exact thing this feature exists to prevent) and the chat left on whichever load
+    # happened to finish last, not the one tapped. One switch at a time, bot-wide.
+    if switching:
+        await _edit_menu(
+            query,
+            f"⏳ Already switching to {next(iter(switching.values()))} — "
+            "wait for that to finish.",
+        )
+        return
+
+    old = active_model(context, chat_id)
+    if new == old:
+        await _edit_menu(query, f"✅ Already using {new}.")
+        return
+
+    # A live stream is reading from the old model; evicting it out from under an answer
+    # in progress is not ours to do. Any chat may be generating, not just this one.
+    if any(not task.done() for task in context.bot_data["tasks"].values()):
+        await _edit_menu(
+            query, "⏳ A generation is still running. Try /model again once it finishes."
+        )
+        return
+
+    chosen: dict = context.bot_data.setdefault("_model", {})
+    previous = chosen.get(chat_id)
+
+    # Claim the switch AND point the chat at `new` now — both writes land before the first
+    # await, so nothing can interleave between the guards above and the claim. Pointing the
+    # chat early is what makes a message typed during the long warm-up target the model
+    # being loaded: resolving it to `old` would cold-load the model we just evicted, right
+    # back beside the new one. Ollama queues that turn behind the load and answers it.
+    switching[chat_id] = new
+    chosen[chat_id] = new
+    try:
+        try:
+            resident = {m["model"] for m in await client.ps()}
+        except BotError:
+            resident = {old}  # can't tell — assume it is, and let the unload attempt speak
+
+        steps = [f"⏳ Switching to {new} …"]
+        if old in resident:
+            steps.append(f"• unloading {old}")
+        steps.append(f"• warming {new} — a cold load takes ~2.5 min")
+        await _edit_menu(query, "\n".join(steps))
+
+        if old in resident:
+            try:
+                await client.unload(old)
+            except BotError as exc:  # non-fatal: the new model still gets its chance
+                logger.warning("could not unload %s while switching: %s", old, exc)
+
+        try:
+            await client.load(new)
+        except BotError as exc:
+            # Roll the claim back: the chat keeps talking to the model it already had.
+            if previous is None:
+                chosen.pop(chat_id, None)
+            else:
+                chosen[chat_id] = previous
+            await _edit_menu(query, f"⚠️ {exc}\nStill using {old}.")
+            return
+    finally:
+        switching.pop(chat_id, None)
+
+    await _edit_menu(
+        query,
+        f"✅ Now using {new} — loaded and warm.\n"
+        "This chat's memory was kept; /reset to start fresh.",
+    )
+
+
+async def _edit_menu(query, text: str) -> None:
+    """Replace the picker with a status line, dropping its keyboard."""
+    try:
+        await query.edit_message_text(text)
+    except TelegramError as exc:
+        logger.debug("model menu edit failed: %s", exc)
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -477,8 +739,9 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # --- wiring (SPEC §13, PLAN M4) --------------------------------------------
 
 def register_handlers(app: Application, cfg: Settings) -> None:
-    """Register /start /help /reset /stats /think + text + photo + error handlers,
-    each wrapped by access_control(cfg). (SPEC §11)"""
+    """Register /start /help /reset /think (+ optional /stats, /model, model-admin),
+    the /model keyboard callbacks, text, photo and error handlers — each wrapped by
+    access_control(cfg). (SPEC §11)"""
     guard = access_control(cfg)
     app.add_handler(CommandHandler("start", guard(cmd_start)))
     app.add_handler(CommandHandler("help", guard(cmd_help)))
@@ -486,6 +749,9 @@ def register_handlers(app: Application, cfg: Settings) -> None:
     app.add_handler(CommandHandler("think", guard(cmd_think)))
     if cfg.commands.enable_stats:
         app.add_handler(CommandHandler("stats", guard(cmd_stats)))
+    if cfg.commands.allow_model_switch:
+        app.add_handler(CommandHandler("model", guard(cmd_model)))
+        app.add_handler(CallbackQueryHandler(guard(on_model_button), pattern=r"^mdl:"))
     if cfg.commands.enable_model_admin:
         app.add_handler(CommandHandler("status", guard(cmd_status)))
         app.add_handler(CommandHandler("load", guard(cmd_load)))
@@ -493,6 +759,21 @@ def register_handlers(app: Application, cfg: Settings) -> None:
     app.add_handler(MessageHandler(filters.PHOTO, guard(on_photo)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guard(on_text)))
     app.add_error_handler(on_error)
+
+
+def allowed_updates(app: Application) -> List[str]:
+    """The update types to ask getUpdates for — derived from what is actually registered.
+
+    Telegram delivers ONLY the types you subscribe to, and silently drops the rest: a
+    registered CallbackQueryHandler is dead code unless ``callback_query`` is in this
+    list, and the button press never even reaches the bot (no error, no log — the tap
+    just does nothing). Deriving the list from the handlers means adding a keyboard can
+    never again leave its callbacks unsubscribed."""
+    kinds = [Update.MESSAGE]
+    handlers = [h for group in app.handlers.values() for h in group]
+    if any(isinstance(h, CallbackQueryHandler) for h in handlers):
+        kinds.append(Update.CALLBACK_QUERY)
+    return kinds
 
 
 def build_application(cfg: Settings) -> Application:

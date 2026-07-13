@@ -10,6 +10,7 @@ the rest of the bot depends only on ``Delta`` + the typed exceptions in errors.p
 
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncIterator, List, Optional
 
 import httpx
@@ -133,6 +134,29 @@ class OllamaClient:
         return [
             {"model": m.model, "size_vram": m.size_vram, "expires_at": m.expires_at}
             for m in (resp.models or [])
+        ]
+
+    async def chat_models(self) -> List[str]:
+        """Installed models that can actually hold a conversation, sorted by name.
+
+        ``/api/tags`` lists everything pulled, including embedding-only models
+        (`nomic-embed-text`, `bge-m3` expose capabilities ``['embedding']`` and no
+        ``completion``). Offering those as a choice would hand the user a button that
+        can only fail, so each name is filtered through the cached capability lookup.
+        A model whose /api/show fails individually is dropped rather than fataled."""
+        try:
+            resp = await self._client.list()
+        except _TRANSPORT_ERRORS as exc:
+            raise self._as_pre_stream_error(exc, self._ollama.model) from exc
+
+        names = sorted({m.model for m in (resp.models or []) if m.model})
+        caps = await asyncio.gather(
+            *(self.capabilities(n) for n in names), return_exceptions=True
+        )
+        return [
+            name
+            for name, cap in zip(names, caps)
+            if isinstance(cap, set) and "completion" in cap
         ]
 
     async def load(self, model: Optional[str] = None) -> None:

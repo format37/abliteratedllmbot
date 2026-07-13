@@ -5,6 +5,7 @@ recording FakeBot. The live end-to-end run (real token + Ollama) is manual (PLAN
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -85,12 +86,16 @@ def make_context(bot, cfg, ollama=None, history=None):
 class FakeOllama:
     """Serves scripted async delta streams, one per chat_stream() call."""
 
-    def __init__(self, *gens, ps_result=None):
+    def __init__(self, *gens, ps_result=None, models=None, load_error=None):
         self._gens = list(gens)
         self.calls: list = []
         self._ps = ps_result if ps_result is not None else []
+        self._models = list(models) if models is not None else []
+        self._load_error = load_error
         self.load_calls = 0
         self.unload_calls = 0
+        self.loaded: list = []    # models passed to load(), in order
+        self.unloaded: list = []  # models passed to unload(), in order
 
     def chat_stream(self, *, messages, model=None, images=None):
         self.calls.append({"messages": messages, "model": model, "images": images})
@@ -99,11 +104,44 @@ class FakeOllama:
     async def ps(self):
         return list(self._ps)
 
+    async def chat_models(self):
+        return list(self._models)
+
     async def load(self, model=None):
         self.load_calls += 1
+        self.loaded.append(model)
+        if self._load_error is not None:
+            raise self._load_error
 
     async def unload(self, model=None):
         self.unload_calls += 1
+        self.unloaded.append(model)
+
+
+class FakeQuery:
+    """A callback_query: records answers and in-place edits of the menu message."""
+
+    def __init__(self, data):
+        self.data = data
+        self.answers: list = []
+        self.edits: list = []
+        self.markups: list = []
+
+    async def answer(self, text="", show_alert=False):
+        self.answers.append({"text": text, "show_alert": show_alert})
+
+    async def edit_message_text(self, text, reply_markup=None, **kw):
+        self.edits.append(text)
+        self.markups.append(reply_markup)
+
+
+def make_callback(data, user_id=OWNER, chat_id=5):
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=user_id),
+        effective_chat=SimpleNamespace(id=chat_id),
+        effective_message=FakeTgMessage(),
+        callback_query=FakeQuery(data),
+    )
 
 
 async def _astream(*deltas):
@@ -547,3 +585,467 @@ def test_build_application_gates_model_admin_handlers(monkeypatch):
     app2 = tb.build_application(cfg2)
     names2 = {getattr(h.callback, "__name__", "") for h in app2.handlers[0]}
     assert {"cmd_status", "cmd_load", "cmd_unload"} <= names2
+
+
+# --- /model: the paged picker -----------------------------------------------
+
+DEFAULT = "qwen3.6-abliterated:35b-a3b"   # == Settings().ollama.model
+MODELS = sorted([
+    DEFAULT,
+    "dagbs/deepseek-coder-v2-lite-instruct:latest",
+    "gpt-oss:latest",
+    "llama3-groq-tool-use:8b",
+    "llama3.1:8b",
+    "llama3.2:latest",
+    "mistral-small3.1:latest",
+    "qwen3-vl:30b-a3b-instruct-q8_0",
+    "qwen3.5:0.8b",
+    "qwen3.5:27b",
+    "qwen3.5:latest",
+    "qwen3.6:35b-a3b",
+])                                          # 12 models -> 3 pages at 5 per page
+
+
+def rows_of(markup):
+    return [[b.text for b in row] for row in markup.inline_keyboard]
+
+
+def data_of(markup):
+    return [[b.callback_data for b in row] for row in markup.inline_keyboard]
+
+
+def render(models=MODELS, page=0, current=DEFAULT, per_page=5):
+    return tb._render_model_page(models, page, current, per_page, {})
+
+
+def test_single_page_has_no_nav_row():
+    # Exactly per_page models: one page, so no navigation buttons at all.
+    text, kb = render(models=MODELS[:5])
+    assert len(rows_of(kb)) == 5 and all(len(r) == 1 for r in rows_of(kb))
+    assert "page" not in text  # nothing to page through
+
+
+def test_first_page_has_no_left_button():
+    text, kb = render(page=0)
+    nav = rows_of(kb)[-1]
+    assert nav == ["1/3", "▶"]              # counter + right only
+    assert len(rows_of(kb)) == 6            # 5 models + nav
+    assert "page 1 of 3" in text
+
+
+def test_middle_page_has_both_arrows():
+    _, kb = render(page=1)
+    assert rows_of(kb)[-1] == ["◀", "2/3", "▶"]
+
+
+def test_last_page_has_no_right_button():
+    text, kb = render(page=2)
+    assert rows_of(kb)[-1] == ["◀", "3/3"]  # counter + left only
+    assert len(rows_of(kb)) == 3            # 12 - 10 = 2 models + nav
+    assert "page 3 of 3" in text
+
+
+def test_buttons_carry_the_full_model_name():
+    _, kb = render(page=0)
+    labels = [r[0] for r in rows_of(kb)[:-1]]
+    assert labels == MODELS[:5]             # full names, verbatim, one per row
+
+
+def test_current_model_is_marked():
+    page = MODELS.index(DEFAULT) // 5
+    _, kb = render(page=page)
+    marked = [lbl for r in rows_of(kb) for lbl in r if lbl.startswith("✅")]
+    assert marked == [f"✅ {DEFAULT}"]       # marked, and still the full name
+
+
+def test_page_is_clamped_to_the_ends():
+    # A stale keyboard can ask for any page; it must land on a real one, not crash.
+    assert "page 3 of 3" in render(page=99)[0]
+    assert "page 1 of 3" in render(page=-4)[0]
+
+
+def test_callback_data_stays_under_telegram_64_byte_cap():
+    _, kb = render(models=MODELS, page=0)
+    for row in data_of(kb):
+        for d in row:
+            assert len(d.encode()) <= 64
+
+
+def test_token_maps_back_to_the_exact_name():
+    tokens: dict = {}
+    tb._render_model_page(MODELS, 0, DEFAULT, 5, tokens)
+    for name in MODELS[:5]:
+        assert tokens[tb._model_token(name)] == name
+
+
+async def test_cmd_model_opens_on_the_page_holding_the_current_model(make_cfg):
+    cfg = make_cfg()
+    ctx = make_context(None, cfg, ollama=FakeOllama(models=MODELS))
+    upd = make_update(chat_id=5)
+    await tb.cmd_model(upd, ctx)
+    text = upd.effective_message.replies[0]
+    assert "page 3 of 3" in text            # DEFAULT sorts into the last page, not the first
+    assert f"Current: {DEFAULT}" in text
+    assert ctx.bot_data["_models"] == MODELS  # snapshot kept so paging needn't re-ask Ollama
+
+
+async def test_cmd_model_reports_when_no_chat_model_exists(make_cfg):
+    ctx = make_context(None, make_cfg(), ollama=FakeOllama(models=[]))
+    upd = make_update(chat_id=5)
+    await tb.cmd_model(upd, ctx)
+    assert "No chat-capable models" in upd.effective_message.replies[0]
+
+
+async def test_page_button_re_renders_in_place(make_cfg):
+    ctx = make_context(None, make_cfg(), ollama=FakeOllama(models=MODELS))
+    ctx.bot_data["_models"] = MODELS
+    cb = make_callback("mdl:p:1", chat_id=5)
+    await tb.on_model_button(cb, ctx)
+    q = cb.callback_query
+    assert q.answers == [{"text": "", "show_alert": False}]  # acked, no alert
+    assert "page 2 of 3" in q.edits[0]
+    assert rows_of(q.markups[0])[-1] == ["◀", "2/3", "▶"]
+
+
+async def test_counter_button_is_inert_but_answered(make_cfg):
+    ctx = make_context(None, make_cfg(), ollama=FakeOllama(models=MODELS))
+    cb = make_callback("mdl:noop", chat_id=5)
+    await tb.on_model_button(cb, ctx)
+    assert cb.callback_query.answers and cb.callback_query.edits == []
+
+
+async def test_stale_page_button_after_restart_says_so(make_cfg):
+    # bot_data lost its snapshot (process restarted); the old keyboard is still on screen.
+    ctx = make_context(None, make_cfg(), ollama=FakeOllama(models=MODELS))
+    cb = make_callback("mdl:p:1", chat_id=5)
+    await tb.on_model_button(cb, ctx)
+    assert "stale" in cb.callback_query.edits[0]
+
+
+async def test_stale_token_alerts_instead_of_switching(make_cfg):
+    fo = FakeOllama(models=MODELS)
+    ctx = make_context(None, make_cfg(), ollama=fo)
+    cb = make_callback("mdl:s:0123456789abcdef", chat_id=5)
+    await tb.on_model_button(cb, ctx)
+    assert cb.callback_query.answers[0]["show_alert"] is True
+    assert fo.load_calls == 0 and fo.unload_calls == 0
+
+
+def _pick(name, chat_id=5):
+    return make_callback(f"mdl:s:{tb._model_token(name)}", chat_id=chat_id)
+
+
+def _ctx_with_menu(make_cfg, fo, cfg=None):
+    """A context whose token map is populated, as it would be after /model."""
+    ctx = make_context(None, cfg or make_cfg(), ollama=fo)
+    ctx.bot_data["_models"] = MODELS
+    tokens: dict = {}
+    for page in range(3):
+        tb._render_model_page(MODELS, page, DEFAULT, 5, tokens)
+    ctx.bot_data["_model_tokens"] = tokens
+    return ctx
+
+
+async def test_select_unloads_old_then_warms_new_and_switches(make_cfg):
+    cfg = make_cfg()
+    new = "gpt-oss:latest"
+    fo = FakeOllama(models=MODELS, ps_result=[{"model": DEFAULT, "size_vram": 1}])
+    ctx = _ctx_with_menu(make_cfg, fo, cfg)
+
+    cb = _pick(new)
+    await tb.on_model_button(cb, ctx)
+
+    assert fo.unloaded == [DEFAULT]        # the old model was evicted first ...
+    assert fo.loaded == [new]              # ... then the new one warmed
+    assert tb.active_model(ctx, 5) == new
+    assert tb._chat_cfg(ctx, 5).ollama.model == new   # generations follow the choice
+    assert cfg.ollama.model == DEFAULT                # shared Settings never mutated
+    assert "Now using" in cb.callback_query.edits[-1]
+
+
+async def test_select_skips_the_unload_when_old_is_not_resident(make_cfg):
+    fo = FakeOllama(models=MODELS, ps_result=[])       # nothing in VRAM
+    ctx = _ctx_with_menu(make_cfg, fo)
+    await tb.on_model_button(_pick("gpt-oss:latest"), ctx)
+    assert fo.unloaded == [] and fo.loaded == ["gpt-oss:latest"]
+
+
+async def test_select_is_declined_while_a_generation_runs(make_cfg):
+    fo = FakeOllama(models=MODELS, ps_result=[{"model": DEFAULT, "size_vram": 1}])
+    ctx = _ctx_with_menu(make_cfg, fo)
+
+    async def forever():
+        await asyncio.sleep(3600)
+
+    live = asyncio.create_task(forever())
+    ctx.bot_data["tasks"][9] = live        # a DIFFERENT chat is mid-stream
+    try:
+        cb = _pick("gpt-oss:latest")
+        await tb.on_model_button(cb, ctx)
+        # unloading now would have killed chat 9's answer mid-flight
+        assert fo.unload_calls == 0 and fo.load_calls == 0
+        assert tb.active_model(ctx, 5) == DEFAULT
+        assert "still running" in cb.callback_query.edits[-1]
+    finally:
+        live.cancel()
+
+
+async def test_select_keeps_the_old_model_when_the_new_one_fails_to_load(make_cfg):
+    from abliteratedllmbot.errors import ModelNotFoundError
+
+    fo = FakeOllama(models=MODELS, ps_result=[{"model": DEFAULT, "size_vram": 1}],
+                    load_error=ModelNotFoundError("Model 'gpt-oss:latest' is not available."))
+    ctx = _ctx_with_menu(make_cfg, fo)
+    cb = _pick("gpt-oss:latest")
+    await tb.on_model_button(cb, ctx)
+
+    assert tb.active_model(ctx, 5) == DEFAULT          # a switch that never loaded is no switch
+    last = cb.callback_query.edits[-1]
+    assert "not available" in last and f"Still using {DEFAULT}" in last
+
+
+async def test_selecting_the_current_model_is_a_noop(make_cfg):
+    fo = FakeOllama(models=MODELS, ps_result=[{"model": DEFAULT, "size_vram": 1}])
+    ctx = _ctx_with_menu(make_cfg, fo)
+    cb = _pick(DEFAULT)
+    await tb.on_model_button(cb, ctx)
+    assert fo.load_calls == 0 and fo.unload_calls == 0
+    assert "Already using" in cb.callback_query.edits[-1]
+
+
+async def test_switch_is_per_chat(make_cfg):
+    fo = FakeOllama(models=MODELS, ps_result=[])
+    ctx = _ctx_with_menu(make_cfg, fo)
+    await tb.on_model_button(_pick("gpt-oss:latest", chat_id=5), ctx)
+    assert tb.active_model(ctx, 5) == "gpt-oss:latest"
+    assert tb.active_model(ctx, 6) == DEFAULT          # another chat keeps the default
+
+
+async def test_generation_uses_the_chats_selected_model(make_bot, make_cfg):
+    bot = make_bot()
+    g = _astream(Delta("content", text="hi"), Delta("done", done_reason="stop"))
+    fo = FakeOllama(g, models=MODELS)
+    ctx = make_context(bot, make_cfg(), ollama=fo)
+    ctx.bot_data["_model"] = {5: "gpt-oss:latest"}
+    tb._dispatch_generation(make_update(chat_id=5, text="q"), ctx, user_text="q")
+    await _settle()
+    assert fo.calls[0]["model"] == "gpt-oss:latest"
+
+
+async def test_vision_override_still_beats_the_chat_choice(make_bot, make_cfg):
+    # An explicit per-turn model (the vision path) is deliberate and must still win.
+    cfg = make_cfg(images={"mode": "vision_fallback"})
+    bot = make_bot()
+    g = _astream(Delta("content", text="a cat"), Delta("done", done_reason="stop"))
+    fo = FakeOllama(g, models=MODELS)
+    ctx = make_context(bot, cfg, ollama=fo)
+    ctx.bot_data["_model"] = {4: "gpt-oss:latest"}
+    await tb.on_photo(make_update(chat_id=4, caption="what", photo=[FakePhoto(b"x")]), ctx)
+    await _settle()
+    assert fo.calls[0]["model"] == cfg.ollama.vision_model
+
+
+async def test_model_admin_commands_follow_the_chat_choice(make_cfg):
+    fo = FakeOllama()
+    ctx = make_context(None, make_cfg(), ollama=fo)
+    ctx.bot_data["_model"] = {5: "gpt-oss:latest"}
+    await tb.cmd_load(make_update(chat_id=5), ctx)
+    await tb.cmd_unload(make_update(chat_id=5), ctx)
+    assert fo.loaded == ["gpt-oss:latest"] and fo.unloaded == ["gpt-oss:latest"]
+
+
+async def test_a_second_tap_during_a_switch_is_declined(make_cfg):
+    # Two taps land while the first is parked in a ~2.5 min load. Without a claim taken
+    # before the first await, BOTH would unload+load: two models resident and the chat
+    # left on whichever load finished last, not the one tapped.
+    loading = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowOllama(FakeOllama):
+        async def load(self, model=None):
+            self.load_calls += 1
+            self.loaded.append(model)
+            loading.set()
+            await release.wait()
+
+    fo = SlowOllama(models=MODELS, ps_result=[{"model": DEFAULT, "size_vram": 1}])
+    ctx = _ctx_with_menu(make_cfg, fo)
+
+    first = asyncio.create_task(tb.on_model_button(_pick("gpt-oss:latest"), ctx))
+    await loading.wait()                       # switch #1 is mid-load
+
+    second = _pick("llama3.2:latest")          # user taps another model
+    # wait_for, not a bare await: an unguarded second switch would block in load() until
+    # the first is released, so the bug must surface as a failure, not a hung test.
+    await asyncio.wait_for(tb.on_model_button(second, ctx), timeout=2)
+    assert "Already switching to gpt-oss:latest" in second.callback_query.edits[-1]
+    assert fo.load_calls == 1                  # the second switch never started
+
+    release.set()
+    await first
+    assert fo.loaded == ["gpt-oss:latest"] and fo.unloaded == [DEFAULT]
+    assert tb.active_model(ctx, 5) == "gpt-oss:latest"   # the model actually tapped
+    assert ctx.bot_data["_switching"] == {}              # claim released
+
+
+async def test_a_message_sent_during_a_switch_targets_the_new_model(make_bot, make_cfg):
+    # The user taps a model, then types while staring at "warming …". That turn must go
+    # to the model being warmed — resolving it to the old one would cold-load the model
+    # we just evicted, right back beside the new one.
+    loading = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowOllama(FakeOllama):
+        async def load(self, model=None):
+            self.load_calls += 1
+            self.loaded.append(model)
+            loading.set()
+            await release.wait()
+
+    g = _astream(Delta("content", text="hi"), Delta("done", done_reason="stop"))
+    fo = SlowOllama(g, models=MODELS, ps_result=[{"model": DEFAULT, "size_vram": 1}])
+    ctx = _ctx_with_menu(make_cfg, fo)
+    ctx.bot = make_bot()
+
+    switch = asyncio.create_task(tb.on_model_button(_pick("gpt-oss:latest"), ctx))
+    await loading.wait()
+
+    tb._dispatch_generation(make_update(chat_id=5, text="what's up"), ctx,
+                            user_text="what's up")
+    await _settle()
+    assert fo.calls[0]["model"] == "gpt-oss:latest"   # NOT the just-unloaded DEFAULT
+
+    release.set()
+    await switch
+
+
+async def test_a_failed_load_rolls_the_claim_back(make_cfg):
+    from abliteratedllmbot.errors import ModelNotFoundError
+
+    fo = FakeOllama(models=MODELS, ps_result=[{"model": DEFAULT, "size_vram": 1}],
+                    load_error=ModelNotFoundError("gone"))
+    ctx = _ctx_with_menu(make_cfg, fo)
+    ctx.bot_data["_model"] = {5: "qwen3.5:27b"}       # this chat had already switched once
+    await tb.on_model_button(_pick("gpt-oss:latest"), ctx)
+    assert tb.active_model(ctx, 5) == "qwen3.5:27b"   # rolled back to the PREVIOUS choice
+    assert ctx.bot_data["_switching"] == {}           # and the claim is not stuck
+
+
+# --- a bare config model name must still match what Ollama reports ------------
+
+def test_qualify_tags_a_bare_name_the_way_ollama_reports_it():
+    assert tb._qualify("gemma3") == "gemma3:latest"        # /api/tags says gemma3:latest
+    assert tb._qualify("qwen3.5:27b") == "qwen3.5:27b"     # already tagged -> untouched
+    assert tb._qualify("dagbs/deepseek:latest") == "dagbs/deepseek:latest"
+    assert tb._qualify("dagbs/deepseek") == "dagbs/deepseek:latest"  # ':' only in the tail
+
+
+async def test_bare_config_name_still_marks_and_unloads(make_cfg):
+    # config `ollama.model: llama3.2` — legal, and `ollama run llama3.2` works — but
+    # /api/tags and /api/ps both say "llama3.2:latest". Compared raw, the ✅ never renders
+    # and `old in resident` is false, so the old model is NEVER unloaded and both stay
+    # pinned in VRAM: the exact outcome unload-then-load exists to prevent.
+    cfg = make_cfg(ollama={"model": "llama3.2"})
+    fo = FakeOllama(models=MODELS, ps_result=[{"model": "llama3.2:latest", "size_vram": 1}])
+    ctx = make_context(None, cfg, ollama=fo)
+
+    upd = make_update(chat_id=5)
+    await tb.cmd_model(upd, ctx)
+    text = upd.effective_message.replies[0]
+    assert "Current: llama3.2:latest" in text
+    page = MODELS.index("llama3.2:latest") // 5
+    assert f"page {page + 1} of 3" in text            # opened on the page holding it
+
+    ctx.bot_data["_models"] = MODELS
+    await tb.on_model_button(_pick("gpt-oss:latest"), ctx)
+    assert fo.unloaded == ["llama3.2:latest"]         # the old model really was evicted
+    assert fo.loaded == ["gpt-oss:latest"]
+
+
+async def test_denied_button_press_is_answered_not_left_spinning(make_cfg):
+    cfg = make_cfg(access={"on_denied": "reply_always"})
+    guarded = tb.access_control(cfg)(tb.on_model_button)
+    cb = make_callback("mdl:p:1", user_id=999)   # a stranger
+    await guarded(cb, make_context(None, cfg))
+    q = cb.callback_query
+    assert q.answers == [{"text": cfg.access.denial_message, "show_alert": True}]
+    assert q.edits == []                          # and the menu is untouched
+
+
+async def test_denied_button_press_stays_silent_under_ignore(make_cfg):
+    cfg = make_cfg(access={"on_denied": "ignore"})
+    guarded = tb.access_control(cfg)(tb.on_model_button)
+    cb = make_callback("mdl:p:1", user_id=999)
+    await guarded(cb, make_context(None, cfg))
+    # acked (no spinner) but told nothing
+    assert cb.callback_query.answers == [{"text": "", "show_alert": False}]
+
+
+async def test_help_lists_model_only_when_enabled(make_cfg):
+    on = make_update(chat_id=1)
+    await tb.cmd_help(on, make_context(None, make_cfg()))
+    assert "/model" in on.effective_message.replies[0]
+
+    off = make_update(chat_id=1)
+    cfg = make_cfg(commands={"allow_model_switch": False})
+    await tb.cmd_help(off, make_context(None, cfg))
+    assert "/model" not in off.effective_message.replies[0]
+
+
+def test_polling_subscribes_to_the_updates_our_handlers_need():
+    """The bug this pins: run_polling asked for allowed_updates=["message"], so Telegram
+    never DELIVERED callback_query at all. The picker rendered, the handler was registered
+    — and every button tap silently did nothing, with no error and no log line. Subscribing
+    is derived from the handlers so a keyboard can never again go unsubscribed."""
+    import os
+    os.environ["TELEGRAM_BOT_TOKEN"] = "1:FAKE"
+    from telegram import Update
+    from abliteratedllmbot.config import Settings
+
+    on = tb.build_application(Settings(commands={"allow_model_switch": True}))
+    assert Update.CALLBACK_QUERY in tb.allowed_updates(on)   # buttons are actually delivered
+    assert Update.MESSAGE in tb.allowed_updates(on)
+
+    off = tb.build_application(Settings(commands={"allow_model_switch": False}))
+    assert tb.allowed_updates(off) == [Update.MESSAGE]       # no keyboards -> nothing to ask for
+
+
+def test_entrypoint_passes_the_derived_allowed_updates(monkeypatch):
+    """…and the entrypoint must actually USE it — asserting on allowed_updates() alone
+    would still have passed while __main__ hard-coded ["message"]."""
+    import os
+    from telegram import Update
+    import abliteratedllmbot.__main__ as entry
+
+    os.environ["TELEGRAM_BOT_TOKEN"] = "1:FAKE"
+    seen: dict = {}
+
+    class FakeApp:
+        handlers = {0: []}
+
+        def run_polling(self, **kw):
+            seen.update(kw)
+
+    app = tb.build_application(__import__(
+        "abliteratedllmbot.config", fromlist=["Settings"]).Settings(
+            commands={"allow_model_switch": True}))
+    fake = FakeApp()
+    fake.handlers = app.handlers
+    monkeypatch.setattr(entry, "build_application", lambda cfg: fake)
+    monkeypatch.setattr(sys, "argv", ["prog"])
+    entry.main()
+    assert Update.CALLBACK_QUERY in seen["allowed_updates"]
+
+
+def test_build_application_gates_the_model_picker():
+    import os
+    os.environ["TELEGRAM_BOT_TOKEN"] = "1:FAKE"
+    from abliteratedllmbot.config import Settings
+
+    off = tb.build_application(Settings(commands={"allow_model_switch": False}))
+    names = {getattr(h.callback, "__name__", "") for h in off.handlers[0]}
+    assert not ({"cmd_model", "on_model_button"} & names)
+
+    on = tb.build_application(Settings(commands={"allow_model_switch": True}))
+    names = {getattr(h.callback, "__name__", "") for h in on.handlers[0]}
+    assert {"cmd_model", "on_model_button"} <= names

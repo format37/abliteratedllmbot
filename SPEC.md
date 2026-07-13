@@ -21,7 +21,7 @@ A Telegram bot that fronts a **local, uncensored (abliterated) LLM served by Oll
 | 9 | Typing | `typing` chat action during the cold‑load / pre‑first‑token gap |
 | 10 | Formatting | pantherabot **rich** path: `sendRichMessage` → `.txt` → MarkdownV2 → plain |
 
-**Non‑goals for v1:** group chats, inline queries, tool calling, SQLite persistence, `/model` switching, audio/voice. All are v1.1 candidates (see [PLAN.md](./PLAN.md) Milestone 6).
+**Non‑goals for v1:** group chats, inline queries, tool calling, SQLite persistence, audio/voice. All are v1.1 candidates (see [PLAN.md](./PLAN.md) Milestone 6). *(`/model` switching was a v1 non‑goal; it shipped — see §11.)*
 
 ---
 
@@ -273,7 +273,20 @@ Default `finalize_mode: rich` with `rich_requires_base_url: false` is **safe eve
 ## 11. Access control & commands
 
 - **`access_control(allowed_ids, cfg)`** decorator wraps every handler; unauthorized `effective_user.id` → `on_denied` policy: `reply_once` (default; a `bot_data` set suppresses repeats — resets on restart, acceptable for v1), `reply_always`, or `ignore`.
-- **Commands (v1):** `/start` (greeting + who‑am‑I), `/help`, `/reset` (clear history), `/stats` (last‑gen tokens/sec + durations from the `done` stats, in‑memory), `/think` (per‑chat toggle of `show_thinking`). **Model‑admin commands** (gated by `commands.enable_model_admin`, default true): `/status` (which models Ollama holds in VRAM + auto‑unload time, via `/api/ps`), `/load` (warm the model — an empty `generate` with `keep_alive`), `/unload` (evict now, `keep_alive:0`). `/model` switching is v1.1, gated by `commands.allow_model_switch` (default false).
+- **Commands (v1):** `/start` (greeting + who‑am‑I), `/help`, `/reset` (clear history), `/stats` (last‑gen tokens/sec + durations from the `done` stats, in‑memory), `/think` (per‑chat toggle of `show_thinking`). **Model‑admin commands** (gated by `commands.enable_model_admin`, default true): `/status` (which models Ollama holds in VRAM + auto‑unload time, via `/api/ps`), `/load` (warm the model — an empty `generate` with `keep_alive`), `/unload` (evict now, `keep_alive:0`).
+
+### `/model` — the paged picker (gated by `commands.allow_model_switch`, default true)
+
+- **Source of truth is Ollama, not config.** `client.chat_models()` lists `/api/tags` and keeps only names whose cached `/api/show` capabilities include `completion` — embedding‑only models (`nomic-embed-text`, `bge-m3` report `['embedding']`) are never offered, because their button could only ever fail.
+- **Layout.** One full model name per row, `commands.models_per_page` (default 5) per page. The chat's current model is marked `✅`. Beyond one page a nav row is appended: `◀` only when a previous page exists, `▶` only when a next one does, and always an inert counter button (`2/3`) between them. The picker opens on the page *holding the current model*, not blindly on page 1.
+- **`callback_data` is capped at 64 bytes** and model names run long, so a button carries `mdl:s:<blake2s‑8 digest>` and `bot_data['_model_tokens']` maps it back to the exact name shown. Nav is `mdl:p:<page>`; the counter is `mdl:noop`. A token from a previous process no longer resolves → the menu says it is stale rather than switching to the wrong model. Pages are clamped, so a stale keyboard cannot scroll off either end.
+- **Scope is per‑chat**, like `/think`: `bot_data['_model'][chat_id]`, folded into a *copy* of `Settings` by `_chat_cfg` (which is why every generation, `/load`, `/unload`, `/status` and `/start` follow the choice). The shared `Settings` is never mutated, and `config.yaml`'s `ollama.model` remains the default for chats that never chose. In‑memory: a restart returns every chat to the default. An explicit per‑turn model (the vision path, §9) still wins.
+- **Selecting = unload old → warm new → confirm.** With `keep_alive` pinned (`-1m`) two 30B models would otherwise sit in VRAM together. A failed load is **rolled back** to the chat's previous model ("a switch that never loaded is not a switch"); a failed *unload* is non‑fatal and only logged. The old model is skipped if `/api/ps` says it is not resident.
+- **A switch is declined while *any* chat is generating** — a live stream is reading from the old model, and evicting it out from under an answer in progress is not the picker's call. The cancel‑and‑supersede policy (§8) is for *newer messages*, not for a menu tap. The user is told to retry when it finishes.
+- **One switch at a time, and the chat is pointed at the new model *before* the warm‑up.** Both writes (`_switching[chat_id]`, `_model[chat_id]`) land **before the first await**, so — exactly as in `_dispatch_generation` (§8) — the event loop cannot interleave between the guards and the claim. This closes two races that PTB's `concurrent_updates(True)` otherwise opens across the ~2.5 min load:
+  - a **second tap** would start a second unload/load pair, leaving *both* models resident (the very thing this design exists to prevent) and the chat on whichever load finished last rather than the one tapped. It is now declined ("already switching to …").
+  - a **message typed while the user waits** would resolve to the *old* model and cold‑load the model we just evicted, right back beside the new one. Claiming early means that turn targets the model being warmed; Ollama queues it behind the load and answers it. (Note `unload` is Ollama's `expireRunner` — it waits for the refcount to reach zero and never aborts a running generation, so the eviction itself is safe.)
+- **Model names are qualified before they are compared** (`_qualify`). `/api/tags` and `/api/ps` always answer fully‑qualified, so a bare `ollama.model: gemma3` (legal — the server resolves it) would match nothing: no `✅` in the picker, the wrong opening page, and `old in resident` false ⇒ **the old model silently never unloaded**. A bare name is tagged `:latest` the way the server reports it; a `:` is only meaningful in the last path segment (`registry/name:tag`).
 
 ---
 
@@ -296,7 +309,7 @@ formatting: finalize_mode(plain|markdown_v2|rich), rich_requires_base_url, rich_
 sanitize:   strip_special_tokens, extra_tokens[]
 images:     mode(reject_note|caption_only|vision_fallback), note
 typing:     enabled, refresh_interval, stop_after_first_token
-commands:   allow_model_switch, enable_stats, enable_model_admin
+commands:   allow_model_switch, models_per_page, enable_stats, enable_model_admin
 logging:    level
 ```
 

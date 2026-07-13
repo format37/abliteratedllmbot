@@ -120,9 +120,19 @@ class TypingConfig(BaseModel):
 
 
 class CommandsConfig(BaseModel):
-    allow_model_switch: bool = False
+    allow_model_switch: bool = True          # /model — paged inline picker
+    models_per_page: int = 5                 # buttons per page of that picker
     enable_stats: bool = True
     enable_model_admin: bool = True          # /status /load /unload (Ollama load control)
+
+    @field_validator("models_per_page")
+    @classmethod
+    def _sane_page(cls, v: int) -> int:
+        # Upper bound is a usability limit, not a Telegram one (it caps a keyboard at
+        # 100 buttons); a page of 20 full model names is already a wall of text.
+        if not 1 <= v <= 20:
+            raise ValueError("models_per_page must be between 1 and 20")
+        return v
 
 
 class LoggingConfig(BaseModel):

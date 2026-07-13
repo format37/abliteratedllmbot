@@ -27,3 +27,12 @@ def test_rollover_must_stay_under_telegram_limit():
 
     with pytest.raises(ValidationError):
         Settings(streaming={"rollover_chars": 5000})
+
+
+def test_models_per_page_must_be_a_usable_page_size():
+    from pydantic import ValidationError
+
+    assert Settings(commands={"models_per_page": 5}).commands.models_per_page == 5
+    for bad in (0, -1, 21):  # a page of zero renders no buttons; 21 is a wall of text
+        with pytest.raises(ValidationError):
+            Settings(commands={"models_per_page": bad})

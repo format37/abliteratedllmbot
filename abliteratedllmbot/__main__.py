@@ -11,7 +11,7 @@ import os
 import sys
 
 from .config import load_config
-from .telegram_bot import build_application
+from .telegram_bot import allowed_updates, build_application
 
 
 def main() -> None:
@@ -28,7 +28,7 @@ def main() -> None:
 
     app = build_application(cfg)
     app.run_polling(
-        allowed_updates=["message"],
+        allowed_updates=allowed_updates(app),  # "message" alone never delivers button taps
         drop_pending_updates=cfg.telegram.drop_pending_updates,
         poll_interval=cfg.telegram.poll_interval,
         timeout=cfg.telegram.long_poll_timeout,

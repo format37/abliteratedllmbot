@@ -103,7 +103,8 @@ typing:
   stop_after_first_token: true # stop typing once a real message is on screen
 
 commands:
-  allow_model_switch: false    # gate /model (v1.1)
+  allow_model_switch: true     # /model — paged inline picker over the models Ollama has
+  models_per_page: 5           # buttons per page (1-20); nav arrows appear beyond one page
   enable_stats: true           # /stats
   enable_model_admin: true     # /status /load /unload — inspect & control Ollama model load
 

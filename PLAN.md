@@ -72,7 +72,7 @@ The four parallel designs agreed on the Ollama facts but disagreed on every seam
 
 ## Milestone 6 — v1.1 (optional, only after core is solid)
 
-SQLite history persistence · vision routing with a real history story · `/model` switching · `/think` persisted per chat · MarkdownV2 vs rich A/B · group‑chat support (reuse pantherabot's group‑membership access model).
+SQLite history persistence · vision routing with a real history story · `/model` **selection persisted across restarts** (the paged picker itself shipped — SPEC §11 — but the choice is in‑memory) · `/think` persisted per chat · MarkdownV2 vs rich A/B · group‑chat support (reuse pantherabot's group‑membership access model).
 
 ---
 

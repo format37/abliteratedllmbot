@@ -16,6 +16,8 @@ rich Markdown (the [pantherabot](https://github.com/format37/pantherabot) way).
 - **Reasoning shown separately** — inline `<think>…</think>` is split out into its
   own message; capability-gated and suppressed when empty.
 - **Multi-turn memory** per chat, `/reset` to clear, configurable cap.
+- **Model switching** — `/model` opens a paged picker over the models Ollama has;
+  picking one unloads the old model and warms the new one.
 - **Rich formatting** — `sendRichMessage` (32768 chars) via an optional local Bot
   API server, degrading to MarkdownV2 → `.txt` → plain.
 - **Images** — text-only models reply with a note (optional vision-model fallback).
@@ -116,6 +118,7 @@ help - list the available commands
 reset - clear this chat's memory
 stats - last generation's tokens/sec
 think - toggle showing the model's reasoning
+model - pick the model this chat talks to
 status - which models Ollama has loaded
 load - warm the model into memory
 unload - free the model from memory
@@ -123,11 +126,27 @@ unload - free the model from memory
 
 (BotFather's format: no leading slash, one `command - description` per line.)
 
-The last four are **conditional**: `/stats` is registered only when
-`commands.enable_stats` is set, and `/status` `/load` `/unload` only when
-`commands.enable_model_admin` is. Both default to true. If you turn either off,
-drop those lines — BotFather cannot see your `config.yaml`, so a disabled command
-would still sit in the menu and silently do nothing.
+### `/model`
+
+Opens an inline picker over the models Ollama actually has (`/api/tags`), minus
+the ones that can't chat — an embedding model like `nomic-embed-text` would only
+ever fail, so it is never offered. One full model name per button,
+`commands.models_per_page` (default 5) per page, with `◀ 2/3 ▶` navigation once
+there is more than one page; the picker opens on the page holding your current
+model, marked `✅`.
+
+Picking a model **unloads the old one, warms the new one, and only then switches**
+— with `keep_alive: -1m` (never auto-unload) two 30B models would otherwise share
+your VRAM. Expect the cold load to take a couple of minutes. If the new model
+fails to load, the old one stays active. The choice is **per chat** and lives in
+memory: a restart returns every chat to `ollama.model` from the config.
+
+Five of those are **conditional**: `/stats` is registered only when
+`commands.enable_stats` is set, `/model` only when `commands.allow_model_switch`
+is, and `/status` `/load` `/unload` only when `commands.enable_model_admin` is.
+All default to true. (`/start` `/help` `/reset` `/think` are always registered.)
+If you turn any off, drop those lines — BotFather cannot see your `config.yaml`,
+so a disabled command would still sit in the menu and silently do nothing.
 
 The menu is global to the bot, but access is not: a user outside
 `telegram.allowed_user_ids` sees the commands and gets `⛔ You are not authorized`

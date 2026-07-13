@@ -98,6 +98,22 @@ def make_bot():
     return _make
 
 
+@pytest.fixture(autouse=True)
+def _isolate_yaml(tmp_path, monkeypatch):
+    """Keep the developer's real config.yaml out of the tests.
+
+    ``Settings()`` layers ``./config.yaml`` whenever no path was set, and ``load_config``
+    records its path on a CLASS attribute — so the repo's live config (and any path a
+    previous test happened to load) silently leaks into every later ``Settings()``. Editing
+    ``ollama.model`` in config.yaml could then break unrelated tests, and test order
+    changed the result. Point each test at a file that does not exist: pure pydantic
+    defaults unless the test overrides them. Tests that call ``load_config`` explicitly
+    still win, and monkeypatch undoes this afterwards."""
+    monkeypatch.setattr(
+        Settings, "_active_yaml_path", str(tmp_path / "no-such-config.yaml"), raising=False
+    )
+
+
 @pytest.fixture
 def make_cfg():
     def _make(**overrides) -> Settings:
