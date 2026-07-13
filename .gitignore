@@ -2,8 +2,10 @@
 .env
 config.yaml
 
-# Local data / model state
-data/
+# Local data / model state. data/ is tracked as an empty dir (.gitkeep) so a
+# clone owns it before Docker can create it as root.
+data/*
+!data/.gitkeep
 *.db
 
 # Python

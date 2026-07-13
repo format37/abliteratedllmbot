@@ -37,18 +37,72 @@ the implementation milestones.
 
 ## Quick start
 
+Both paths need the same two local files, neither of which is committed:
+
+```bash
+cp config.example.yaml config.yaml      # then set telegram.allowed_user_ids
+cp .env.example .env                     # then set TELEGRAM_BOT_TOKEN
+```
+
+Your Telegram user ID goes in `config.yaml → telegram.allowed_user_ids`
+(get it from [@userinfobot](https://t.me/userinfobot)). Ollama must already be
+running on the host with your model pulled.
+
+### Docker Compose (recommended)
+
+```bash
+docker compose up --build -d      # build + run in the background
+docker compose logs -f            # follow; expect "Ollama reachable"
+docker compose down               # stop
+```
+
+That's it — no Python toolchain, no venv. `restart: unless-stopped` brings the
+bot back after a reboot, and logs are capped at 3×10 MB.
+
+`config.yaml` and `.env` are bind-mounted, never baked into the image, so
+editing them and running `docker compose restart` is enough to pick up changes
+(a code change still needs `--build`).
+
+**Reaching Ollama from inside the container.** `config.yaml` ships with
+`ollama.host: http://localhost:11434`, and inside a container `localhost` is the
+*container itself* — so that address would fail. Compose therefore sets
+`OLLAMA__HOST=http://host.docker.internal:11434` for you (env overrides yaml, and
+only that one key), which is mapped to the host via `extra_hosts`. You don't have
+to change `config.yaml`, and it keeps working for a bare-metal run.
+
+If Ollama is itself a container on a shared Docker network, point the bot at it
+by service name instead — set this in `.env` and Compose will use it:
+
+```bash
+OLLAMA__HOST=http://ollama:11434
+```
+
+Ollama must be listening on more than loopback for the host mapping to work
+(`OLLAMA_HOST=0.0.0.0`); check with `curl http://localhost:11434/api/version`.
+
+**File ownership.** The container runs as `1000:1000` rather than root, so
+anything it writes into the bind-mounted `./data` (i.e. `history.db`, once
+`memory.persist` is on) stays owned by your host user — otherwise Docker creates
+those files as `root` and a later bare-metal run can't write them. `1000` is the
+first user on most Linux hosts; if `id -u` prints something else, tell Compose
+once:
+
+```bash
+echo "UID=$(id -u)" >> .env && echo "GID=$(id -g)" >> .env
+```
+
+(Docker Desktop on macOS/Windows maps ownership itself and ignores this.) If you
+already have a root-owned `data/` from an earlier run, reset it without sudo via
+`docker run --rm -v ./data:/d alpine chown -R $(id -u):$(id -g) /d`.
+
+### Local Python
+
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt         # or: pip install -e .
 
-cp config.example.yaml config.yaml      # then set telegram.allowed_user_ids
-cp .env.example .env                     # then set TELEGRAM_BOT_TOKEN
-
 python -m abliteratedllmbot              # uses ./config.yaml
 ```
-
-Your Telegram user ID goes in `config.yaml → telegram.allowed_user_ids`
-(get it from [@userinfobot](https://t.me/userinfobot)).
 
 ## Configuration
 
@@ -63,9 +117,15 @@ Telegram API and finalizes answers as MarkdownV2.
 
 ## Deployment
 
-- **systemd:** edit and install [`deploy/abliteratedllmbot.service`](./deploy/abliteratedllmbot.service).
-- **Docker:** `docker compose up --build -d` (reaches host Ollama via
-  `host.docker.internal`; set `ollama.host` accordingly).
+- **Docker Compose** — see [Quick start](#docker-compose-recommended) above;
+  `restart: unless-stopped` already survives reboots, so there's nothing else to
+  install.
+- **systemd** (bare metal) — edit the paths in
+  [`deploy/abliteratedllmbot.service`](./deploy/abliteratedllmbot.service), then:
+  ```bash
+  sudo cp deploy/abliteratedllmbot.service /etc/systemd/system/
+  sudo systemctl daemon-reload && sudo systemctl enable --now abliteratedllmbot
+  ```
 
 ## Development
 

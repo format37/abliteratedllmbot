@@ -4,11 +4,22 @@ services:
     container_name: abliteratedllmbot
     restart: unless-stopped
     env_file: .env
+    # Run as you, not root, so anything written into the bind-mounted ./data
+    # (history.db) stays owned by your host user instead of coming back root:root.
+    # 1000:1000 is the first user on most Linux hosts; if `id -u` says otherwise,
+    # put UID= and GID= in .env. Ignored by Docker Desktop (macOS/Windows), which
+    # maps ownership for you anyway.
+    user: "${UID:-1000}:${GID:-1000}"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./data:/app/data
-    # Reach the host's Ollama from inside the container. Set ollama.host in
-    # config.yaml to http://host.docker.internal:11434 to use this mapping.
+    environment:
+      # config.yaml says localhost:11434, which inside a container means the
+      # container itself. Point it at the host instead, without touching
+      # config.yaml (env beats yaml, and only this one key is overridden — see
+      # config.py). Override by setting OLLAMA__HOST in .env, e.g. when Ollama
+      # is a container on a shared network: http://ollama:11434
+      OLLAMA__HOST: ${OLLAMA__HOST:-http://host.docker.internal:11434}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     logging:
