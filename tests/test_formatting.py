@@ -203,7 +203,19 @@ def _rich_cfg(make_cfg, monkeypatch, token="TESTTOKEN", base="http://localhost:8
     return make_cfg(telegram={"base_url": base})
 
 
-async def test_send_rich_no_base_url_returns_false(make_cfg):
+async def test_send_rich_no_base_url_uses_official_api(make_cfg, monkeypatch):
+    """No local Bot API server needed: api.telegram.org implements sendRichMessage."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+    cfg = make_cfg(telegram={"base_url": None})
+    monkeypatch.setattr(fmt.httpx, "AsyncClient", lambda **kw: _FakeHTTP(data={"ok": True}))
+    assert await send_rich_message(cfg, 1, "hi") is True
+    assert _FakeHTTP.last_payload["url"] == (
+        "https://api.telegram.org/botTESTTOKEN/sendRichMessage"
+    )
+
+
+async def test_send_rich_no_token_returns_false(make_cfg, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     cfg = make_cfg(telegram={"base_url": None})
     assert await send_rich_message(cfg, 1, "hi") is False
 
@@ -283,7 +295,9 @@ async def test_finalize_rich_success_deletes_scratch(make_bot, make_cfg, monkeyp
     assert bot.deleted == {1000, 1001}  # scratch removed; rich message re-appears
 
 
-async def test_finalize_rich_no_base_url_degrades_to_markdown(make_bot, make_cfg, monkeypatch):
+async def test_finalize_rich_without_base_url_still_attempts_rich(make_bot, make_cfg, monkeypatch):
+    """Default rich_requires_base_url=False: the official API serves rich, so a
+    missing base_url must NOT silently degrade LaTeX/tables to MarkdownV2."""
     called = {"rich": False}
 
     async def fake_rich(*a, **k):
@@ -292,8 +306,26 @@ async def test_finalize_rich_no_base_url_degrades_to_markdown(make_bot, make_cfg
 
     monkeypatch.setattr(fmt, "send_rich_message", fake_rich)
     bot = make_bot()
-    # default: rich_requires_base_url=True, base_url=None -> never attempt rich
     cfg = make_cfg(formatting={"finalize_mode": "rich"}, telegram={"base_url": None})
+    await finalize(bot, cfg, 1, "hi **there**", [1000])
+    assert called["rich"] is True
+    assert bot.deleted == {1000}
+
+
+async def test_finalize_rich_gated_by_base_url_degrades_to_markdown(make_bot, make_cfg, monkeypatch):
+    """Opt-in gate: rich_requires_base_url=True + no base_url -> never attempt rich."""
+    called = {"rich": False}
+
+    async def fake_rich(*a, **k):
+        called["rich"] = True
+        return True
+
+    monkeypatch.setattr(fmt, "send_rich_message", fake_rich)
+    bot = make_bot()
+    cfg = make_cfg(
+        formatting={"finalize_mode": "rich", "rich_requires_base_url": True},
+        telegram={"base_url": None},
+    )
     await finalize(bot, cfg, 1, "hi **there**", [1000])
     assert called["rich"] is False
     edits = bot.calls_of("edit")

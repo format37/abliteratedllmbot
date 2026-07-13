@@ -26,6 +26,9 @@ from .config import Settings
 
 logger = logging.getLogger(__name__)
 
+# PTB convention: base ends in "/bot", the token is appended directly.
+OFFICIAL_API_BASE = "https://api.telegram.org/bot"
+
 # Placeholder sentinels wrap a stash index; they contain no MarkdownV2 special
 # chars, so escape_markdown leaves them intact and we restore afterwards.
 _PH = "\x00{}\x00"
@@ -111,10 +114,15 @@ async def send_rich_message(
 ) -> bool:
     """POST {base_url}{token}/sendRichMessage (Bot API 10.1). Returns True on ``ok``,
     False on any failure so the caller can fall down the chain. Ported from
-    pantherabot; base_url follows the PTB convention (ends in ``/bot``)."""
-    base_url = cfg.telegram.base_url
+    pantherabot; base_url follows the PTB convention (ends in ``/bot``).
+
+    The OFFICIAL API implements sendRichMessage too — a local Bot API server is
+    NOT required for rich/LaTeX output (verified: api.telegram.org answers
+    "rich message must be non-empty", not 404). So when no base_url is set we
+    still send rich, against api.telegram.org."""
+    base_url = cfg.telegram.base_url or OFFICIAL_API_BASE
     token = cfg.telegram_bot_token
-    if not base_url or not token:
+    if not token:
         return False
     url = f"{base_url}{token}/sendRichMessage"
     payload: dict = {"chat_id": chat_id, "rich_message": {"markdown": markdown_text}}
@@ -237,8 +245,9 @@ async def finalize(
     """Apply cfg.formatting.finalize_mode to the completed answer, optionally with the
     model's reasoning as a collapsed (tap-to-expand) block above it. (SPEC §8, §10)
 
-    'rich' only attempts sendRichMessage when telegram.base_url is set (unless
-    rich_requires_base_url is False); on success it deletes the scratch messages
+    'rich' sends via sendRichMessage, which the official API supports — no local
+    Bot API server needed (set rich_requires_base_url to gate it on a base_url);
+    on success it deletes the scratch messages
     so the answer re-appears richly formatted; otherwise it degrades gracefully
     (>txt_fallback_over -> .txt document, else markdown_v2 in place). Reasoning
     collapse needs markup, so 'plain' and the .txt fallback show the answer only."""

@@ -253,7 +253,7 @@ finalize(chat_id, full_text, scratch_msg_ids):
   if mode == "plain":       leave scratch as-is.
   if mode == "markdown_v2": edit scratch in place with MarkdownV2 (placeholder-escape);
                             on BadRequest → revert to plain.  (in place, no "swap")
-  if mode == "rich":        try sendRichMessage (only if base_url set OR rich_requires_base_url=false)
+  if mode == "rich":        try sendRichMessage (always, unless rich_requires_base_url=true and no base_url)
                               → on ok: delete scratch, message re-appears rich (32768 cap)
                               → on fail/>rich_max_chars:
                                    if len>txt_fallback_over: send .txt document, delete scratch
@@ -262,7 +262,11 @@ finalize(chat_id, full_text, scratch_msg_ids):
 
 **`send_rich_message`** is ported verbatim from pantherabot: `POST {base_url}/bot{token}/sendRichMessage` with `{"chat_id", "rich_message":{"markdown":…}}`, `ok` → True else False. **MarkdownV2** reuses pantherabot's placeholder‑token trick (`&&&`→`*`, `%%%`→`_`, `@@@`→`__`, `~~~`→`~`, protect ` ``` ` / `||`) around `telegram.helpers.escape_markdown(version=2)`.
 
-Default `finalize_mode: rich` is **safe everywhere**: with `rich_requires_base_url: true` and no `base_url` (official API) it degrades to `markdown_v2` automatically — no wasted round‑trip. Point `telegram.base_url` at your local `http://localhost:8081/bot` server to light up true rich messages.
+> **`sendRichMessage` is served by the OFFICIAL API — a local Bot API server is not required.** Verified against `api.telegram.org`: an unknown method returns `404 Not Found`, whereas `sendRichMessage` returns `400 "rich message must be non-empty"`, and a real call returns `ok: true`. When no `base_url` is set, `send_rich_message` falls back to `OFFICIAL_API_BASE` (`https://api.telegram.org/bot`) rather than bailing out.
+>
+> This corrects an earlier assumption in this SPEC. Formatting is **orthogonal to polling vs webhook** — that choice only affects how *updates are received*, never how messages are *rendered*. pantherabot runs a local server for its file-size limits (2 GB vs 20 MB), not for rich output.
+
+Default `finalize_mode: rich` with `rich_requires_base_url: false` is **safe everywhere** and is what makes LaTeX render. Setting `rich_requires_base_url: true` with no `base_url` degrades to `markdown_v2`, which **cannot** render maths — formulas arrive as raw `$$…$$`. `telegram.base_url` remains optional, for a local Bot API server's other benefits.
 
 ---
 

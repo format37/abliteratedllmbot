@@ -69,10 +69,14 @@ streaming:
   max_retry_after: 30          # cap how long we sleep on a 429
 
 formatting:
-  # plain | markdown_v2 | rich. 'rich' degrades to markdown_v2 automatically
-  # when no telegram.base_url is set (see rich_requires_base_url).
+  # plain | markdown_v2 | rich.
+  # 'rich' (sendRichMessage) renders headings, tables and native LaTeX ($$...$$).
+  # It works on the OFFICIAL api.telegram.org — no local Bot API server needed.
+  # markdown_v2 CANNOT render LaTeX: maths arrives as raw "$$" text.
   finalize_mode: rich
-  rich_requires_base_url: true # only attempt sendRichMessage when base_url is set
+  # false (default): always attempt rich. true: only when telegram.base_url is set
+  # — that gate is what makes maths degrade to raw $$, so leave it false.
+  rich_requires_base_url: false
   rich_max_chars: 32768
   txt_fallback_over: 4096      # >this and rich failed -> send answer as a .txt document
 

@@ -92,7 +92,10 @@ class StreamingConfig(BaseModel):
 
 class FormattingConfig(BaseModel):
     finalize_mode: Literal["plain", "markdown_v2", "rich"] = "rich"
-    rich_requires_base_url: bool = True
+    # False: sendRichMessage works on the OFFICIAL api.telegram.org — no local Bot
+    # API server needed for LaTeX/tables. Set True to only attempt rich when a
+    # base_url is configured (e.g. if Telegram ever drops the method).
+    rich_requires_base_url: bool = False
     rich_max_chars: int = 32768
     txt_fallback_over: int = 4096
 

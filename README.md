@@ -111,9 +111,16 @@ canonical schema is [`config.example.yaml`](./config.example.yaml). The only
 secret, `TELEGRAM_BOT_TOKEN`, lives in `.env`. Any nested key can be overridden by
 an env var using the `__` delimiter, e.g. `OLLAMA__MODEL=qwen3.5:27b`.
 
-Rich messages are opt-in: set `telegram.base_url` to your local Bot API server
-(e.g. `http://localhost:8081/bot`). Without it the bot runs on the official
-Telegram API and finalizes answers as MarkdownV2.
+Rich messages are **on by default and need no extra infrastructure**: the
+official `api.telegram.org` implements `sendRichMessage` (Bot API 10.1), so
+headings, tables and **native LaTeX** (`$$…$$`) render out of the box. This is
+what makes a maths answer show as typeset formulas instead of raw `$$` markup.
+
+`telegram.base_url` (e.g. `http://localhost:8081/bot`) is therefore optional —
+point it at a local Bot API server only if you want its *other* benefits, chiefly
+the 2 GB file-download limit instead of the official API's 20 MB. Formatting does
+not depend on it, nor on polling vs webhook. Set
+`formatting.rich_requires_base_url: true` to gate rich on a base_url anyway.
 
 ## Deployment
 
