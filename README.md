@@ -104,6 +104,35 @@ pip install -r requirements.txt         # or: pip install -e .
 python -m abliteratedllmbot              # uses ./config.yaml
 ```
 
+## Commands
+
+The bot works without this, but registering the commands with
+[@BotFather](https://t.me/BotFather) gives you the `/` autocomplete menu in
+Telegram. Send BotFather `/setcommands`, pick the bot, and paste:
+
+```
+start - who am I and which model is backing me
+help - list the available commands
+reset - clear this chat's memory
+stats - last generation's tokens/sec
+think - toggle showing the model's reasoning
+status - which models Ollama has loaded
+load - warm the model into memory
+unload - free the model from memory
+```
+
+(BotFather's format: no leading slash, one `command - description` per line.)
+
+The last four are **conditional**: `/stats` is registered only when
+`commands.enable_stats` is set, and `/status` `/load` `/unload` only when
+`commands.enable_model_admin` is. Both default to true. If you turn either off,
+drop those lines — BotFather cannot see your `config.yaml`, so a disabled command
+would still sit in the menu and silently do nothing.
+
+The menu is global to the bot, but access is not: a user outside
+`telegram.allowed_user_ids` sees the commands and gets `⛔ You are not authorized`
+for every one of them.
+
 ## Configuration
 
 All non-secret settings live in `config.yaml` (**gitignored**); the annotated
