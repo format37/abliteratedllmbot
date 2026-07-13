@@ -10,6 +10,8 @@ from telegram.error import BadRequest
 import abliteratedllmbot.formatting as fmt
 from abliteratedllmbot.formatting import (
     finalize,
+    output_summary,
+    rich_enabled,
     send_rich_message,
     to_expandable_blockquote,
     to_markdown_v2,
@@ -384,3 +386,42 @@ async def test_finalize_rich_over_max_chars_skips_rich(make_bot, make_cfg, monke
     await finalize(bot, cfg, 1, big, [1000])
     assert called["rich"] is False
     assert len(bot.documents) == 1 and bot.deleted == {1000}
+
+
+# --- startup banner ---------------------------------------------------------
+# The banner exists to make a silent rich->markdown_v2 degradation loud (a stale
+# `docker compose restart` shipped old code against new config, and LaTeX quietly
+# stopped rendering). If it ever disagrees with finalize(), it is worse than useless.
+
+def test_banner_reports_rich_on_official_api(make_cfg):
+    cfg = make_cfg(formatting={"finalize_mode": "rich"}, telegram={"base_url": None})
+    assert rich_enabled(cfg) is True
+    out = output_summary(cfg)
+    assert "rich" in out and "api.telegram.org" in out
+    assert "NOT render" not in out
+
+
+def test_banner_shouts_when_rich_is_gated_off(make_cfg):
+    cfg = make_cfg(
+        formatting={"finalize_mode": "rich", "rich_requires_base_url": True},
+        telegram={"base_url": None},
+    )
+    assert rich_enabled(cfg) is False
+    out = output_summary(cfg)
+    assert "DEGRADED" in out and "LaTeX will NOT render" in out
+
+
+def test_banner_shouts_when_mode_cannot_render_latex(make_cfg):
+    cfg = make_cfg(formatting={"finalize_mode": "markdown_v2"})
+    assert "LaTeX will NOT render" in output_summary(cfg)
+
+
+@pytest.mark.parametrize("base,gated", [(None, False), ("http://x/bot", False), ("http://x/bot", True)])
+def test_banner_never_disagrees_with_finalize(make_cfg, base, gated):
+    """rich_enabled() is what finalize() branches on — they cannot drift apart."""
+    cfg = make_cfg(
+        formatting={"finalize_mode": "rich", "rich_requires_base_url": gated},
+        telegram={"base_url": base},
+    )
+    claims_rich = "sendRichMessage" in output_summary(cfg)
+    assert claims_rich is rich_enabled(cfg)

@@ -22,6 +22,7 @@ from telegram.ext import (
 
 from .config import Settings
 from .errors import BotError
+from .formatting import output_summary
 from .history import InMemoryStore, Message, build_messages
 from .ollama_client import OllamaClient
 from .streaming import RenderDriver
@@ -103,6 +104,15 @@ async def on_startup(app: Application) -> None:
     cfg: Settings = app.bot_data["cfg"]
     client = OllamaClient(cfg.ollama, cfg.reasoning, cfg.sanitize)
     app.bot_data["ollama"] = client
+
+    # Say what the running code will actually DO, not what the config asks for. A stale
+    # `docker compose restart` (no --build) keeps old code against new config, and the
+    # resulting degradation is otherwise silent.
+    logger.info("Output: %s", output_summary(cfg))
+    logger.info("Images: mode=%s (photos are %s)", cfg.images.mode,
+                "DROPPED, only the caption is sent" if cfg.images.mode == "reject_note"
+                else "sent to " + cfg.ollama.vision_model)
+
     try:
         await client.startup()  # warm caps for model (+ vision_model); tolerant of vision
         logger.info("Ollama reachable; capability cache warm.")

@@ -109,6 +109,30 @@ def to_expandable_blockquote(text: str) -> str:
     return "\n".join(">" + ln for ln in lines) + "||"
 
 
+def rich_enabled(cfg: Settings) -> bool:
+    """Will finalize actually attempt sendRichMessage? Single source of truth, so the
+    startup banner cannot drift from what finalize() really does."""
+    return bool(cfg.telegram.base_url) or not cfg.formatting.rich_requires_base_url
+
+
+def output_summary(cfg: Settings) -> str:
+    """One-line description of the effective output pipeline, logged at startup.
+
+    Exists because a stale build / a gating flag silently degrades rich -> markdown_v2,
+    and MarkdownV2 cannot render LaTeX: maths then arrives as raw "$$" and the only
+    clue is the *absence* of a warning. Make the effective mode loud instead."""
+    mode = cfg.formatting.finalize_mode
+    if mode == "rich" and not rich_enabled(cfg):
+        return (
+            "finalize=rich but DEGRADED to markdown_v2 (rich_requires_base_url=true and no "
+            "telegram.base_url) -> LaTeX will NOT render, maths arrives as raw $$"
+        )
+    if mode == "rich":
+        target = cfg.telegram.base_url or OFFICIAL_API_BASE
+        return f"finalize=rich via sendRichMessage ({target}) -> LaTeX/tables render"
+    return f"finalize={mode} -> LaTeX will NOT render, maths arrives as raw $$"
+
+
 async def send_rich_message(
     cfg: Settings, chat_id: int, markdown_text: str, reply_to: Optional[int] = None
 ) -> bool:
@@ -263,8 +287,7 @@ async def finalize(
         return
 
     # mode == "rich"
-    may_rich = bool(cfg.telegram.base_url) or not fmt.rich_requires_base_url
-    if may_rich and len(full_text) <= fmt.rich_max_chars:
+    if rich_enabled(cfg) and len(full_text) <= fmt.rich_max_chars:
         rich_md = full_text
         if reasoning:  # rich messages take standard Markdown; a '>' blockquote for reasoning
             quoted = "\n".join("> " + ln for ln in f"{_REASONING_HEADER}\n{reasoning}".split("\n"))
