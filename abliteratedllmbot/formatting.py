@@ -34,6 +34,12 @@ OFFICIAL_API_BASE = "https://api.telegram.org/bot"
 # further away than this is "never", not a real deadline.
 _PINNED_AFTER = timedelta(days=365)
 
+# A single-$ span that is NOT part of a $$ display block, capturing whitespace-padded
+# content on one line. Telegram only renders inline maths with the padding removed.
+_INLINE_MATH = re.compile(r"(?<!\$)\$(?!\$)([^$\n]*?)\$(?!\$)")
+# Something that marks the span as maths rather than prose/currency.
+_LATEX_SIGNAL = re.compile(r"[\\^_{}=]")
+
 # Placeholder sentinels wrap a stash index; they contain no MarkdownV2 special
 # chars, so escape_markdown leaves them intact and we restore afterwards.
 _PH = "\x00{}\x00"
@@ -112,6 +118,32 @@ def to_expandable_blockquote(text: str) -> str:
     escaped = escape_markdown(text, version=2)  # escapes all specials, incl. literal > and |
     lines = escaped.split("\n")
     return "\n".join(">" + ln for ln in lines) + "||"
+
+
+def normalize_math_delimiters(text: str) -> str:
+    r"""Make the model's LaTeX match what Telegram's rich renderer actually accepts.
+
+    Verified against the live API — inline ``$…$`` renders ONLY when there is no
+    whitespace just inside the delimiters. Models habitually write ``$ a = 1 $``
+    (padded), which then arrives as literal text next to perfectly rendered ``$$…$$``
+    display math. Also map ``\(…\)`` / ``\[…\]``, which Telegram does not render at
+    all, onto the delimiters it does.
+
+    Conservative on purpose: the padding is only stripped when the content carries a
+    LaTeX signal (a command, sub/superscript, brace or ``=``), so prose about money —
+    "between $ 5 and $ 10" — is never silently turned into maths."""
+    # \(...\) -> $...$  and  \[...\] -> $$...$$   (neither renders in Telegram)
+    text = re.sub(r"\\\(\s*(.+?)\s*\\\)", r"$\1$", text, flags=re.S)
+    text = re.sub(r"\\\[\s*(.+?)\s*\\\]", r"$$\n\1\n$$", text, flags=re.S)
+
+    def _tighten(m: "re.Match") -> str:
+        inner = m.group(1).strip()
+        if not inner or not _LATEX_SIGNAL.search(inner):
+            return m.group(0)  # not maths (e.g. a currency range) -> leave alone
+        return f"${inner}$"
+
+    # $ x $ -> $x$, but never touch $$...$$ (guarded by the (?<!\$) / (?!\$) lookarounds).
+    return _INLINE_MATH.sub(_tighten, text)
 
 
 def format_model_expiry(expires_at, now=None) -> str:
@@ -324,10 +356,11 @@ async def finalize(
 
     # mode == "rich"
     if rich_enabled(cfg) and len(full_text) <= fmt.rich_max_chars:
-        rich_md = full_text
+        # Telegram renders inline $…$ only unpadded; models write "$ a = 1 $".
+        rich_md = normalize_math_delimiters(full_text)
         if reasoning:  # rich messages take standard Markdown; a '>' blockquote for reasoning
             quoted = "\n".join("> " + ln for ln in f"{_REASONING_HEADER}\n{reasoning}".split("\n"))
-            rich_md = quoted + "\n\n" + full_text
+            rich_md = quoted + "\n\n" + rich_md
         if await send_rich_message(cfg, chat_id, rich_md):
             for mid in scratch_message_ids:
                 await _safe_delete(bot, chat_id, mid)

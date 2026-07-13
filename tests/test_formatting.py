@@ -11,6 +11,7 @@ import abliteratedllmbot.formatting as fmt
 from abliteratedllmbot.formatting import (
     finalize,
     format_model_expiry,
+    normalize_math_delimiters,
     output_summary,
     rich_enabled,
     send_rich_message,
@@ -468,3 +469,81 @@ def test_expired_and_missing_are_not_crashes():
     assert "expiring now" in format_model_expiry(_NOW - timedelta(minutes=1), now=_NOW)
     assert format_model_expiry(None) == "unload time unknown"
     assert format_model_expiry("garbage") == "unload time unknown"
+
+
+# --- math delimiters --------------------------------------------------------
+# Verified against the live Telegram renderer: inline $...$ renders ONLY when there
+# is no whitespace just inside the $. Models write "$ a = 1 $", which arrived as
+# literal text sitting next to perfectly rendered $$...$$ display maths.
+
+def test_padded_inline_math_is_tightened():
+    assert normalize_math_delimiters(r"where $ a = 1 + \sqrt{3} $ ok") == (
+        r"where $a = 1 + \sqrt{3}$ ok"
+    )
+
+
+def test_already_tight_inline_math_is_untouched():
+    assert normalize_math_delimiters(r"$a=1$") == r"$a=1$"
+
+
+def test_display_math_is_never_touched():
+    src = "$$\nx^2 - 5x + 6 = 0\n$$"
+    assert normalize_math_delimiters(src) == src
+
+
+def test_single_line_display_math_survives():
+    assert normalize_math_delimiters("$$a = 1$$") == "$$a = 1$$"
+
+
+def test_paren_and_bracket_delimiters_are_mapped():
+    assert normalize_math_delimiters(r"value \(a = 1\) here") == r"value $a = 1$ here"
+    assert "$$" in normalize_math_delimiters(r"\[ x^2 \]")
+
+
+def test_currency_prose_is_not_turned_into_maths():
+    """The reason the padding strip is gated on a LaTeX signal."""
+    for prose in ["it costs $ 5 and $ 10 total", "between $5 and $10"]:
+        assert normalize_math_delimiters(prose) == prose
+
+
+def test_multiple_inline_spans_on_one_line():
+    out = normalize_math_delimiters(r"$ a = 1 $ and $ b = -2 $")
+    assert out == r"$a = 1$ and $b = -2$"
+
+
+def test_the_exact_answer_from_the_screenshot():
+    src = "- $ a = 1 + \\sqrt{3} \\approx 2.732 $\n- $ b = -\\frac{7}{4} = -1.75 $"
+    out = normalize_math_delimiters(src)
+    assert r"$a = 1 + \sqrt{3} \approx 2.732$" in out
+    assert r"$b = -\frac{7}{4} = -1.75$" in out
+    assert "$ " not in out            # no padding after an opening $
+    assert " $\n" not in out          # nor before a closing one (the bullet's "- $" is fine)
+
+
+async def test_finalize_rich_normalizes_math_before_sending(make_bot, make_cfg, monkeypatch):
+    """The bug must be fixed on the path that actually ships — not just in the helper."""
+    seen = {}
+
+    async def fake_rich(cfg, chat_id, md, reply_to=None):
+        seen["md"] = md
+        return True
+
+    monkeypatch.setattr(fmt, "send_rich_message", fake_rich)
+    cfg = make_cfg(formatting={"finalize_mode": "rich"}, telegram={"base_url": None})
+    await finalize(make_bot(), cfg, 1, r"where $ a = 1 $ ok", [1000])
+    assert seen["md"] == r"where $a = 1$ ok"
+
+
+async def test_finalize_rich_normalizes_math_even_with_reasoning(make_bot, make_cfg, monkeypatch):
+    """Regression: the reasoning branch rebuilt the message from the RAW text,
+    which would have silently discarded the normalisation."""
+    seen = {}
+
+    async def fake_rich(cfg, chat_id, md, reply_to=None):
+        seen["md"] = md
+        return True
+
+    monkeypatch.setattr(fmt, "send_rich_message", fake_rich)
+    cfg = make_cfg(formatting={"finalize_mode": "rich"}, telegram={"base_url": None})
+    await finalize(make_bot(), cfg, 1, r"$ a = 1 $", [1000], reasoning="thinking")
+    assert r"$a = 1$" in seen["md"] and "$ a = 1 $" not in seen["md"]
