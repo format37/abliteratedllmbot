@@ -175,8 +175,8 @@ def active_model(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
 
 
 def _chat_cfg(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Settings:
-    """Fold this chat's overrides — /think and /model — into a copy of the shared
-    Settings, which is never mutated. (SPEC §11)"""
+    """Fold this chat's overrides — /think, /model and /prompt — into a copy of the
+    shared Settings, which is never mutated. (SPEC §11)"""
     cfg: Settings = context.bot_data["cfg"]
     overrides: dict = {}
     hidden: set = context.bot_data.get("_think_off", set())
@@ -185,6 +185,9 @@ def _chat_cfg(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Settings:
     chosen = active_model(context, chat_id)
     if chosen != cfg.ollama.model:
         overrides["ollama"] = cfg.ollama.model_copy(update={"model": chosen})
+    prompt = context.bot_data.get("_system_prompt", {}).get(chat_id)
+    if prompt is not None:
+        overrides["system_prompt"] = prompt
     return cfg.model_copy(update=overrides) if overrides else cfg
 
 
@@ -375,6 +378,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/help — this help",
         "/reset — clear this chat's memory",
         "/interrupt — stop the answer being generated",
+        "/prompt — show or set this chat's system prompt",
     ]
     if cfg.commands.enable_stats:  # only advertise /stats if it's actually registered
         lines.append("/stats — last generation's tokens/sec")
@@ -411,6 +415,55 @@ async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         driver.cancel_note = cfg.streaming.interrupted_note
     task.cancel()
     await update.effective_message.reply_text("⏹️ Interrupted the current generation.")
+
+
+# Telegram caps a message at 4096 chars; the echo adds a header, so a prompt near that
+# size must be shortened when shown back or the reply itself is rejected.
+_PROMPT_PREVIEW = 3500
+
+
+def _prompt_preview(text: str) -> str:
+    return text if len(text) <= _PROMPT_PREVIEW else text[:_PROMPT_PREVIEW] + " …"
+
+
+async def cmd_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/prompt <text> sets this chat's system prompt, /prompt shows it, /prompt reset
+    restores the configured default. Per chat and in memory, like /model. (SPEC §11)"""
+    cfg: Settings = context.bot_data["cfg"]
+    chat_id = update.effective_chat.id
+    message = update.effective_message
+    custom: dict = context.bot_data.setdefault("_system_prompt", {})
+    default = cfg.system_prompt.strip()
+
+    # Take the raw remainder after the command token, not context.args: args are split
+    # on whitespace, which would flatten a multi-line prompt into one line.
+    parts = (message.text or "").split(None, 1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if not arg:
+        current = custom.get(chat_id)
+        if current is None:
+            head = "📝 This chat uses the default system prompt:"
+            body = default or "(empty)"
+        else:
+            head = "📝 This chat's system prompt (custom):"
+            body = current
+        await message.reply_text(
+            f"{head}\n\n{_prompt_preview(body)}\n\n"
+            "Set: /prompt <text> · default: /prompt reset"
+        )
+        return
+
+    if arg.lower() == "reset" or arg == default:
+        custom.pop(chat_id, None)
+        await message.reply_text("↩️ System prompt restored to the default for this chat.")
+        return
+
+    custom[chat_id] = arg
+    await message.reply_text(
+        f"✅ System prompt set for this chat:\n\n{_prompt_preview(arg)}\n\n"
+        "Memory was kept; /reset to start fresh. /prompt reset restores the default."
+    )
 
 
 async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -717,7 +770,7 @@ async def _edit_menu(query, text: str) -> None:
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    cfg: Settings = context.bot_data["cfg"]
+    cfg = _chat_cfg(context, chat_id)  # the estimate must count THIS chat's /prompt
     store: InMemoryStore = context.bot_data["history"]
     last = context.bot_data.get("_last_stats", {}).get(chat_id)
     opts = cfg.ollama.options
@@ -763,14 +816,15 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # --- wiring (SPEC §13, PLAN M4) --------------------------------------------
 
 def register_handlers(app: Application, cfg: Settings) -> None:
-    """Register /start /help /reset /interrupt /think (+ optional /stats, /model, model-admin),
-    the /model keyboard callbacks, text, photo and error handlers — each wrapped by
-    access_control(cfg). (SPEC §11)"""
+    """Register /start /help /reset /interrupt /prompt /think (+ optional /stats, /model,
+    model-admin), the /model keyboard callbacks, text, photo and error handlers — each
+    wrapped by access_control(cfg). (SPEC §11)"""
     guard = access_control(cfg)
     app.add_handler(CommandHandler("start", guard(cmd_start)))
     app.add_handler(CommandHandler("help", guard(cmd_help)))
     app.add_handler(CommandHandler("reset", guard(cmd_reset)))
     app.add_handler(CommandHandler("interrupt", guard(cmd_interrupt)))
+    app.add_handler(CommandHandler("prompt", guard(cmd_prompt)))
     app.add_handler(CommandHandler("think", guard(cmd_think)))
     if cfg.commands.enable_stats:
         app.add_handler(CommandHandler("stats", guard(cmd_stats)))

@@ -1115,3 +1115,93 @@ def test_build_application_gates_the_model_picker():
     on = tb.build_application(Settings(commands={"allow_model_switch": True}))
     names = {getattr(h.callback, "__name__", "") for h in on.handlers[0]}
     assert {"cmd_model", "on_model_button"} <= names
+
+
+# --- /prompt: per-chat system prompt (SPEC §11) -----------------------------
+
+def _gen_ok():
+    return _astream(Delta("content", text="ok"), Delta("done", done_reason="stop"))
+
+
+async def test_prompt_sets_the_system_prompt_for_the_next_turn(make_bot, make_cfg):
+    fo = FakeOllama(_gen_ok())
+    ctx = make_context(make_bot(), make_cfg(), ollama=fo)
+    u = make_update(chat_id=5, text="/prompt you are helpful assistant")
+    await tb.cmd_prompt(u, ctx)
+    assert "System prompt set" in u.effective_message.replies[0]
+
+    tb._dispatch_generation(make_update(chat_id=5, text="q"), ctx, user_text="q")
+    await _settle()
+    assert fo.calls[0]["messages"][0] == {
+        "role": "system", "content": "you are helpful assistant"}
+
+
+async def test_prompt_keeps_newlines_and_strips_bot_mention(make_bot, make_cfg):
+    ctx = make_context(make_bot(), make_cfg(), ollama=FakeOllama())
+    await tb.cmd_prompt(
+        make_update(chat_id=5, text="/prompt@MyBot  line one\nline two  "), ctx)
+    assert ctx.bot_data["_system_prompt"][5] == "line one\nline two"
+
+
+async def test_prompt_without_args_shows_default_then_custom(make_cfg):
+    cfg = make_cfg()
+    ctx = make_context(None, cfg)
+    u = make_update(chat_id=5, text="/prompt")
+    await tb.cmd_prompt(u, ctx)
+    assert "default" in u.effective_message.replies[0]
+    assert cfg.system_prompt.strip() in u.effective_message.replies[0]
+
+    await tb.cmd_prompt(make_update(chat_id=5, text="/prompt be terse"), ctx)
+    u = make_update(chat_id=5, text="/prompt")
+    await tb.cmd_prompt(u, ctx)
+    assert "custom" in u.effective_message.replies[0]
+    assert "be terse" in u.effective_message.replies[0]
+
+
+async def test_prompt_reset_restores_the_default(make_bot, make_cfg):
+    cfg = make_cfg()
+    fo = FakeOllama(_gen_ok())
+    ctx = make_context(make_bot(), cfg, ollama=fo)
+    await tb.cmd_prompt(make_update(chat_id=5, text="/prompt be a pirate"), ctx)
+    u = make_update(chat_id=5, text="/prompt RESET")
+    await tb.cmd_prompt(u, ctx)
+    assert "restored" in u.effective_message.replies[0]
+    assert 5 not in ctx.bot_data["_system_prompt"]
+
+    tb._dispatch_generation(make_update(chat_id=5, text="q"), ctx, user_text="q")
+    await _settle()
+    assert fo.calls[0]["messages"][0]["content"] == cfg.system_prompt
+
+
+async def test_prompt_is_per_chat_and_keeps_memory(make_bot, make_cfg):
+    cfg = make_cfg()
+    store = InMemoryStore()
+    store.append(5, Message("user", "earlier"))
+    store.append(5, Message("assistant", "reply"))
+    fo = FakeOllama(_gen_ok())
+    ctx = make_context(make_bot(), cfg, ollama=fo, history=store)
+    await tb.cmd_prompt(make_update(chat_id=5, text="/prompt be a pirate"), ctx)
+    assert len(store.get(5)) == 2                       # memory kept
+
+    tb._dispatch_generation(make_update(chat_id=6, text="q"), ctx, user_text="q")
+    await _settle()
+    assert fo.calls[0]["messages"][0]["content"] == cfg.system_prompt  # chat 6 untouched
+
+
+async def test_prompt_echo_is_capped_below_telegram_limit(make_cfg):
+    ctx = make_context(None, make_cfg())
+    u = make_update(chat_id=5, text="/prompt " + "x" * 4090)
+    await tb.cmd_prompt(u, ctx)
+    assert len(ctx.bot_data["_system_prompt"][5]) == 4090  # stored in full
+    assert len(u.effective_message.replies[0]) <= 4096     # but the echo fits a message
+
+
+async def test_stats_estimate_counts_the_chat_prompt(make_cfg):
+    cfg = make_cfg()
+    ctx = make_context(None, cfg)
+    ctx.bot_data["_system_prompt"] = {5: "x" * 4000}
+    u = make_update(chat_id=5)
+    await tb.cmd_stats(u, ctx)
+    default_u = make_update(chat_id=6)
+    await tb.cmd_stats(default_u, ctx)
+    assert u.effective_message.replies[0] != default_u.effective_message.replies[0]
