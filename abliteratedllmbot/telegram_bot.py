@@ -258,6 +258,9 @@ async def _run_generation(
         driver = RenderDriver(bot, chat_id, cfg)
         if typing is not None and cfg.typing.stop_after_first_token:
             driver.on_first_content = typing.stop
+        # Expose the live driver so /interrupt can retarget its cancel note. Keyed
+        # per chat like `tasks`; a superseding turn simply overwrites the entry.
+        context.bot_data.setdefault("drivers", {})[chat_id] = driver
 
         stream = client.chat_stream(messages=messages, model=model, images=images)
         await driver.run(stream)
@@ -277,6 +280,9 @@ async def _run_generation(
     finally:
         if typing is not None:
             typing.stop()
+        drivers: dict = context.bot_data.get("drivers", {})
+        if driver is not None and drivers.get(chat_id) is driver:
+            drivers.pop(chat_id, None)
 
     # Persist the produced turn on success AND on a post-content failure (not on a
     # pre-stream BotError, which returned above, nor on cancel, which re-raised).
@@ -368,6 +374,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start — who am I",
         "/help — this help",
         "/reset — clear this chat's memory",
+        "/interrupt — stop the answer being generated",
     ]
     if cfg.commands.enable_stats:  # only advertise /stats if it's actually registered
         lines.append("/stats — last generation's tokens/sec")
@@ -387,6 +394,23 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store: InMemoryStore = context.bot_data["history"]
     store.reset(update.effective_chat.id)
     await update.effective_message.reply_text("🧹 Memory cleared for this chat.")
+
+
+async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stop this chat's in-flight generation. Cancelling the task closes the HTTP
+    stream, which makes Ollama abort the generation server-side; the partial answer
+    is sealed with the interrupted note and NOT stored (same path as supersede)."""
+    chat_id = update.effective_chat.id
+    cfg: Settings = context.bot_data["cfg"]
+    task = context.bot_data["tasks"].get(chat_id)
+    if task is None or task.done():
+        await update.effective_message.reply_text("Nothing is generating right now.")
+        return
+    driver = context.bot_data.get("drivers", {}).get(chat_id)
+    if driver is not None:
+        driver.cancel_note = cfg.streaming.interrupted_note
+    task.cancel()
+    await update.effective_message.reply_text("⏹️ Interrupted the current generation.")
 
 
 async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -739,13 +763,14 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # --- wiring (SPEC §13, PLAN M4) --------------------------------------------
 
 def register_handlers(app: Application, cfg: Settings) -> None:
-    """Register /start /help /reset /think (+ optional /stats, /model, model-admin),
+    """Register /start /help /reset /interrupt /think (+ optional /stats, /model, model-admin),
     the /model keyboard callbacks, text, photo and error handlers — each wrapped by
     access_control(cfg). (SPEC §11)"""
     guard = access_control(cfg)
     app.add_handler(CommandHandler("start", guard(cmd_start)))
     app.add_handler(CommandHandler("help", guard(cmd_help)))
     app.add_handler(CommandHandler("reset", guard(cmd_reset)))
+    app.add_handler(CommandHandler("interrupt", guard(cmd_interrupt)))
     app.add_handler(CommandHandler("think", guard(cmd_think)))
     if cfg.commands.enable_stats:
         app.add_handler(CommandHandler("stats", guard(cmd_stats)))
@@ -786,5 +811,6 @@ def build_application(cfg: Settings) -> Application:
     app.bot_data["cfg"] = cfg
     app.bot_data["history"] = InMemoryStore()
     app.bot_data["tasks"] = {}
+    app.bot_data["drivers"] = {}
     register_handlers(app, cfg)
     return app

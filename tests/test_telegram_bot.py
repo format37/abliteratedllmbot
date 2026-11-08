@@ -244,6 +244,72 @@ async def test_supersede_cancels_previous_and_keeps_latest(make_bot, make_cfg):
     assert 5 not in ctx.bot_data["tasks"]  # registry cleaned up
 
 
+async def test_interrupt_cancels_live_generation(make_bot, make_cfg):
+    cfg = make_cfg()
+    bot = make_bot()
+    store = InMemoryStore()
+
+    started = asyncio.Event()
+
+    async def slow_gen():
+        yield Delta("content", text="partial answer")
+        started.set()
+        await asyncio.sleep(3600)  # block until cancelled
+        yield Delta("done", done_reason="stop")
+
+    ctx = make_context(bot, cfg, ollama=FakeOllama(slow_gen()), history=store)
+
+    tb._dispatch_generation(make_update(chat_id=5, text="q"), ctx, user_text="q")
+    await started.wait()
+
+    u = make_update(chat_id=5, text="/interrupt")
+    await tb.cmd_interrupt(u, ctx)
+    await _settle()
+
+    # confirmed to the user; partial sealed with the INTERRUPTED note, not the supersede one
+    assert any("Interrupted" in r for r in u.effective_message.replies)
+    texts = list(bot.messages.values())
+    assert any("partial answer" in t and cfg.streaming.interrupted_note in t for t in texts)
+    assert not any(cfg.streaming.superseded_note in t for t in texts)
+    assert store.get(5) == []              # the interrupted turn is not stored
+    assert 5 not in ctx.bot_data["tasks"]  # registry cleaned up
+    assert 5 not in ctx.bot_data.get("drivers", {})
+
+
+async def test_interrupt_when_idle_says_so(make_bot, make_cfg):
+    ctx = make_context(make_bot(), make_cfg(), ollama=FakeOllama())
+    u = make_update(chat_id=5, text="/interrupt")
+    await tb.cmd_interrupt(u, ctx)
+    assert u.effective_message.replies == ["Nothing is generating right now."]
+
+
+async def test_interrupt_only_stops_its_own_chat(make_bot, make_cfg):
+    cfg = make_cfg()
+    bot = make_bot()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_gen():
+        yield Delta("content", text="other chat streaming")
+        started.set()
+        await release.wait()
+        yield Delta("done", done_reason="stop")
+
+    ctx = make_context(bot, cfg, ollama=FakeOllama(slow_gen()))
+    tb._dispatch_generation(make_update(chat_id=1, text="x"), ctx, user_text="x")
+    await started.wait()
+
+    u = make_update(chat_id=2, text="/interrupt")  # a DIFFERENT chat interrupts
+    await tb.cmd_interrupt(u, ctx)
+    await _settle()
+    assert u.effective_message.replies == ["Nothing is generating right now."]
+    assert 1 in ctx.bot_data["tasks"]  # chat 1's generation untouched
+
+    release.set()
+    await _settle()
+    assert any("other chat streaming" in t for t in bot.messages.values())
+
+
 async def test_different_chats_run_independently(make_bot, make_cfg):
     # Chat 2 must NOT supersede chat 1: a supersede is per-chat only.
     cfg = make_cfg()

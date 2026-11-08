@@ -196,6 +196,9 @@ class RenderDriver:
         self._heartbeat_task: Optional[asyncio.Task] = None
         # Optional hook fired once when the first real answer token lands (typing-stop).
         self.on_first_content: Optional[Callable[[], Awaitable[None] | None]] = None
+        # What _on_cancel appends. Defaults to the supersede wording; /interrupt
+        # overwrites it before cancelling so the seal says what actually happened.
+        self.cancel_note: str = cfg.streaming.superseded_note
 
     async def run(self, deltas: AsyncIterator[Delta]) -> None:
         """Drive the stream to completion, then finalize formatting. (SPEC §8, §10)"""
@@ -322,10 +325,10 @@ class RenderDriver:
         )
 
     async def _on_cancel(self) -> None:
-        """Cancel-and-supersede cleanup: append the superseded note and seal the
-        live message, shielded so the cancellation can't abort the final edit.
-        (SPEC §8 concurrency)"""
-        note = self.cfg.streaming.superseded_note
+        """Cancellation cleanup (supersede or /interrupt): append the cancel note
+        and seal the live message, shielded so the cancellation can't abort the
+        final edit. (SPEC §8 concurrency)"""
+        note = self.cancel_note
         try:
             if self.answer_editor is not None:
                 if note:

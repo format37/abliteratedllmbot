@@ -68,6 +68,7 @@ streaming:
   empty_response_text: "(the model returned an empty response)"
   error_note: "⚠️ Generation error: {error}"
   superseded_note: "↩️ Superseded by your newer message."
+  interrupted_note: "⏹️ Interrupted."   # sealed onto a partial answer stopped by /interrupt
   max_retry_after: 30          # cap how long we sleep on a 429
 
 formatting:

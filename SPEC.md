@@ -273,7 +273,7 @@ Default `finalize_mode: rich` with `rich_requires_base_url: false` is **safe eve
 ## 11. Access control & commands
 
 - **`access_control(allowed_ids, cfg)`** decorator wraps every handler; unauthorized `effective_user.id` → `on_denied` policy: `reply_once` (default; a `bot_data` set suppresses repeats — resets on restart, acceptable for v1), `reply_always`, or `ignore`.
-- **Commands (v1):** `/start` (greeting + who‑am‑I), `/help`, `/reset` (clear history), `/stats` (last‑gen tokens/sec + durations from the `done` stats, in‑memory), `/think` (per‑chat toggle of `show_thinking`). **Model‑admin commands** (gated by `commands.enable_model_admin`, default true): `/status` (which models Ollama holds in VRAM + auto‑unload time, via `/api/ps`), `/load` (warm the model — an empty `generate` with `keep_alive`), `/unload` (evict now, `keep_alive:0`).
+- **Commands (v1):** `/start` (greeting + who‑am‑I), `/help`, `/reset` (clear history), `/interrupt` (cancel this chat's in‑flight generation: reuses the §8 cancel path — the partial answer is sealed with `streaming.interrupted_note` instead of the supersede note, nothing is stored, and closing the HTTP stream makes Ollama abort the generation server‑side; replies "nothing is generating" when idle), `/stats` (last‑gen tokens/sec + durations from the `done` stats, in‑memory), `/think` (per‑chat toggle of `show_thinking`). **Model‑admin commands** (gated by `commands.enable_model_admin`, default true): `/status` (which models Ollama holds in VRAM + auto‑unload time, via `/api/ps`), `/load` (warm the model — an empty `generate` with `keep_alive`), `/unload` (evict now, `keep_alive:0`).
 
 ### `/model` — the paged picker (gated by `commands.allow_model_switch`, default true)
 
@@ -304,7 +304,7 @@ reasoning:  think_mode(auto|inline|off), show_thinking, max_thinking_chars
 memory:     enabled, max_turns, max_tokens, chars_per_token, persist, db_path
 streaming:  batch_size, min_edit_interval, max_interval_seconds, rollover_chars,
             supersede_policy(cancel), placeholder_text, empty_response_text,
-            error_note, superseded_note, max_retry_after
+            error_note, superseded_note, interrupted_note, max_retry_after
 formatting: finalize_mode(plain|markdown_v2|rich), rich_requires_base_url, rich_max_chars, txt_fallback_over
 sanitize:   strip_special_tokens, extra_tokens[]
 images:     mode(reject_note|caption_only|vision_fallback), note

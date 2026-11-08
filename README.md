@@ -116,6 +116,7 @@ Telegram. Send BotFather `/setcommands`, pick the bot, and paste:
 start - who am I and which model is backing me
 help - list the available commands
 reset - clear this chat's memory
+interrupt - stop the answer being generated
 stats - last generation's tokens/sec
 think - toggle showing the model's reasoning
 model - pick the model this chat talks to
@@ -144,7 +145,7 @@ memory: a restart returns every chat to `ollama.model` from the config.
 Five of those are **conditional**: `/stats` is registered only when
 `commands.enable_stats` is set, `/model` only when `commands.allow_model_switch`
 is, and `/status` `/load` `/unload` only when `commands.enable_model_admin` is.
-All default to true. (`/start` `/help` `/reset` `/think` are always registered.)
+All default to true. (`/start` `/help` `/reset` `/interrupt` `/think` are always registered.)
 If you turn any off, drop those lines — BotFather cannot see your `config.yaml`,
 so a disabled command would still sit in the menu and silently do nothing.
 

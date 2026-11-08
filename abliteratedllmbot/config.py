@@ -83,6 +83,7 @@ class StreamingConfig(BaseModel):
     empty_response_text: str = "(the model returned an empty response)"
     error_note: str = "⚠️ Generation error: {error}"
     superseded_note: str = "↩️ Superseded by your newer message."
+    interrupted_note: str = "⏹️ Interrupted."
     max_retry_after: int = 30
 
     @field_validator("rollover_chars")
